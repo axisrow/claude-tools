@@ -1,0 +1,208 @@
+#!/usr/bin/env bash
+# hookctl — управление своими PreToolUse/PostToolUse-хуками в ~/.claude/settings.json.
+#
+# Модель: гибрид А+Б.
+#   - registry.json (рядом) — источник правды для «своих» хуков (id, event, matcher,
+#     command, enabled, timeout, statusMessage).
+#   - При каждом enable/disable/add/edit hookctl ПЕРЕСТРАИВАЕТ секцию hooks в
+#     ~/.claude/settings.json:
+#       1) удаляет из settings.json только те hook-записи, чей command ведёт в
+#          claude-tools/ (маркер OUR_MARKER);
+#       2) достраивает секцию из registry.json (только enabled:true), группируя
+#          по event + matcher;
+#       3) merge: чужие группы (SessionStart и любые другие) остаются нетронутыми,
+#          наши добавляются/замещаются.
+#   - Все прочие ключи settings.json (env, permissions, model, enabledPlugins ...)
+#     сохраняются.
+#   - Перед записью — валидация `jq empty` и бэкап .bak.
+#
+# Команды:
+#   list                          показать реестр (id, event, enabled)
+#   status                        сверить реестр с актуальной секцией в settings.json
+#   enable  <id>                  включить хук (enabled=true) + regenerate
+#   disable <id>                  выключить хук (enabled=false) + regenerate
+#   edit    [id]                  открыть registry.json в $EDITOR + regenerate
+#   add                           подсказка по добавлению нового хука
+set -euo pipefail
+
+# --- Пути -------------------------------------------------------------------
+# Разрешаем symlink: при запуске через ~/bin/hookctl BASH_SOURCE указывает на symlink,
+# и без readlink реестр искался бы в ~/registry.json.
+SELF="${BASH_SOURCE[0]}"
+while [ -L "$SELF" ]; do
+  DIR="$(cd "$(dirname "$SELF")" >/dev/null 2>&1 && pwd)"
+  SELF="$(readlink "$SELF")"
+  case "$SELF" in
+    /*) : ;;
+    *) SELF="$DIR/$SELF" ;;
+  esac
+done
+SCRIPT_DIR="$(cd "$(dirname "$SELF")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+REGISTRY="$PROJECT_DIR/registry.json"
+SETTINGS="${CLAUDE_SETTINGS:-$HOME/.claude/settings.json}"
+OUR_MARKER="/claude-tools/"
+
+# --- Проверки ---------------------------------------------------------------
+need_jq() {
+  command -v jq >/dev/null 2>&1 || { echo "hookctl: jq не найден. Установите: brew install jq" >&2; exit 1; }
+}
+need_jq
+
+[ -f "$REGISTRY" ] || { echo "hookctl: реестр не найден: $REGISTRY" >&2; exit 1; }
+[ -f "$SETTINGS" ] || { echo "hookctl: settings.json не найден: $SETTINGS" >&2; exit 1; }
+
+# --- regenerate: перестроить секцию hooks в settings.json -------------------
+regenerate() {
+  local tmp
+  tmp="$(mktemp)"
+  # jq-программа.
+  #   $marker = OUR_MARKER ("/claude-tools/"), $reg = [registry.json].
+  #   (A) из settings.hooks убрать записи с command из claude-tools/ (маркер).
+  #   (B) построить нашу секцию из реестра (enabled:true), сгруппировав по event -> matcher.
+  #   (C) слить: чужие группы события + наша группа.
+  jq --arg marker "$OUR_MARKER" --slurpfile reg "$REGISTRY" '
+    # (A) Вычистить свои hook-записи. hooks: { "<Event>": [ {matcher?, hooks:[...]}, ... ] }.
+    (if has("hooks") and (.hooks | type) == "object" then
+       .hooks |= with_entries(
+         .value |= if type == "array" then
+           map(.hooks |= (if type == "array" then map(select((.command // "") | test($marker) | not)) else . end))
+           | map(select((.hooks // []) | length > 0))
+         else . end
+       )
+       | .hooks |= with_entries(select(.value | type == "array" and length > 0))
+     else . end)
+    | . as $cleaned
+
+    # (B) Наша секция из реестра (enabled:true), группировка по event -> matcher.
+    #     outcmd собирает {type,command,timeout?,statusMessage?}, потом фильтруем null-поля.
+    | ((($reg[0].hooks // []) | map(select(.enabled == true)))
+         | map(. + { outcmd: { type:"command", command:.command,
+                               timeout:(.timeout), statusMessage:(.statusMessage) } })
+         | group_by(.event)
+         | map({ key: .[0].event,
+                 value: (group_by(.matcher // "*")
+                         | map({ matcher: (.[0].matcher // "*"),
+                                 hooks: (map(.outcmd
+                                             | to_entries
+                                             | map(select(.value != null))
+                                             | from_entries)) }) ) })
+         | from_entries) as $oursByEvent
+
+    # (C) Слить: по событию — чужие группы + наша группа.
+    | $cleaned
+    | .hooks = ( ($cleaned.hooks // {}) as $existing
+        | reduce ($oursByEvent | to_entries[]) as $e ($existing;
+            .[$e.key] = (($existing[$e.key] // []) + $e.value) ) )
+  ' "$SETTINGS" > "$tmp" || { echo "hookctl: ошибка jq-перестройки" >&2; rm -f "$tmp"; exit 1; }
+
+  # Валидация результата
+  if ! jq empty "$tmp" >/dev/null 2>&1; then
+    echo "hookctl: результат невалидный JSON — отбой, settings.json не тронут" >&2
+    rm -f "$tmp"
+    exit 1
+  fi
+
+  # Бэкап и атомарная замена
+  cp "$SETTINGS" "$SETTINGS.bak"
+  mv "$tmp" "$SETTINGS"
+}
+
+# --- Команды ----------------------------------------------------------------
+cmd_list() {
+  jq -r '.hooks[] | "\(.enabled | if . then "[on] " else "[off]" end)  \(.id)  (\(.event) / \(.matcher // "*"))"' "$REGISTRY"
+}
+
+cmd_enable() {
+  local id="$1"
+  if ! jq -e --arg id "$id" '.hooks[] | select(.id==$id)' "$REGISTRY" >/dev/null; then
+    echo "hookctl: хук не найден: $id" >&2; exit 1
+  fi
+  jq --arg id "$id" '.hooks |= map(if .id==$id then .enabled=true else . end)' "$REGISTRY" > "$REGISTRY.tmp" \
+    && mv "$REGISTRY.tmp" "$REGISTRY"
+  regenerate
+  echo "Включён: $id"
+}
+
+cmd_disable() {
+  local id="$1"
+  if ! jq -e --arg id "$id" '.hooks[] | select(.id==$id)' "$REGISTRY" >/dev/null; then
+    echo "hookctl: хук не найден: $id" >&2; exit 1
+  fi
+  jq --arg id "$id" '.hooks |= map(if .id==$id then .enabled=false else . end)' "$REGISTRY" > "$REGISTRY.tmp" \
+    && mv "$REGISTRY.tmp" "$REGISTRY"
+  regenerate
+  echo "Выключен: $id"
+}
+
+cmd_status() {
+  echo "Реестр ($REGISTRY):"
+  cmd_list
+  echo
+  echo "Актуальная секция hooks в $SETTINGS:"
+  if jq -e '.hooks' "$SETTINGS" >/dev/null 2>&1; then
+    jq -r '.hooks | to_entries[] | "  \(.key): \(.value | length) групп(а)"' "$SETTINGS"
+    echo
+    echo "Свои хуки (command содержит '$OUR_MARKER'):"
+    local n
+    n="$(jq --arg m "$OUR_MARKER" '[.hooks // {} | .. | .command? // empty | select(test($m))] | length' "$SETTINGS")"
+    echo "    найдено: $n"
+  else
+    echo "  (секция hooks отсутствует)"
+  fi
+}
+
+cmd_edit() {
+  local id="${1:-}"
+  local editor="${EDITOR:-vi}"
+  echo "Открываю $REGISTRY в $editor ..."
+  "$editor" "$REGISTRY"
+  regenerate
+  [ -n "$id" ] && echo "(после правки применён regenerate; проверь: hookctl status)"
+}
+
+cmd_add() {
+  echo "Добавление нового хука: правь $REGISTRY вручную, добавь объект в массив hooks:"
+  cat <<'TPL'
+
+  {
+    "id": "my-hook",
+    "event": "PreToolUse",
+    "matcher": "Bash",
+    "command": "/Users/axisrow/Projects/claude-tools/hooks/my-hook.sh",
+    "timeout": 5,
+    "statusMessage": "...",
+    "enabled": true
+  }
+
+TPL
+  echo "После правки: hookctl edit   (regenerate встроен в edit/enable/disable)"
+}
+
+# --- dispatch ---------------------------------------------------------------
+usage() {
+  cat <<EOF
+hookctl — управление своими Claude Code хуками.
+
+  hookctl list                   показать реестр
+  hookctl status                 сверить реестр с settings.json
+  hookctl enable  <id>           включить хук
+  hookctl disable <id>           выключить хук
+  hookctl edit    [id]           открыть registry.json в \$EDITOR + regenerate
+  hookctl add                    подсказка по добавлению нового хука
+
+Реестр:    $REGISTRY
+Settings:  $SETTINGS
+EOF
+}
+
+case "${1:-}" in
+  list)    cmd_list ;;
+  status)  cmd_status ;;
+  enable)  [ -n "${2:-}" ] || { echo "usage: hookctl enable <id>" >&2; exit 1; }; cmd_enable "$2" ;;
+  disable) [ -n "${2:-}" ] || { echo "usage: hookctl disable <id>" >&2; exit 1; }; cmd_disable "$2" ;;
+  edit)    cmd_edit "${2:-}" ;;
+  add)     cmd_add ;;
+  ""|-h|--help|help) usage ;;
+  *) echo "hookctl: неизвестная команда: $1" >&2; usage; exit 1 ;;
+esac

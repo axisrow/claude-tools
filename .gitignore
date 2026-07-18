@@ -1,0 +1,9 @@
+# macOS
+.DS_Store
+
+# Бэкапы hookctl (settings.json.bak лежит в ~/.claude, но на всякий случай)
+*.bak
+
+# Редакторы
+*.swp
+*~
