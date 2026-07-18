@@ -34,14 +34,15 @@ jq '.hooks.PreToolUse' "$HOME/.claude/settings.json"      # увидеть за�
 jq empty "$HOME/.claude/settings.json"                    # валидность JSON
 
 # Ручной тест хука (имитация того, что харнесс скармливает на stdin):
+PROJECT_DIR="$HOME/Projects/claude-tools"   # каталог, куда клонирован репо
 echo '{"tool_input":{"command":"git push origin --delete feat/x"}}' \
-  | /Users/axisrow/Projects/claude-tools/hooks/git-branch-guard.sh
+  | "$PROJECT_DIR/hooks/git-branch-guard.sh"
 # Ожидается: JSON с permissionDecision:"ask" и причиной
 
 # Прогнать хук против набора команд и проверить, какие срабатывают:
 for c in "git push origin --delete x" "git push -f origin main" "git push origin new" "git status"; do
   printf '%s\n' "$c" | jq -ncR --arg cmd "$c" '{tool_input:{command:$cmd}}' \
-    | /Users/axisrow/Projects/claude-tools/hooks/git-branch-guard.sh >/dev/null 2>&1 \
+    | "$PROJECT_DIR/hooks/git-branch-guard.sh" >/dev/null 2>&1 \
     && echo "ASK:   $c" || echo "pass:  $c"
 done
 ```
@@ -78,10 +79,12 @@ done
 
 Формат Claude Code hooks: `hooks: { "<Event>": [ {matcher?, hooks:[{type,command,...}]}, ... ] }`.
 
-**Маркер `/claude-tools/`** — контракт всего механизма. Любой `command`, не содержащий
-этой подстроки, считается чужим и не трогается. Если меняешь пути/маркер — `regenerate`
-перестанет узнавать свои же хуки и начнёт их дублировать. Пути в реестре сейчас
-захардкожены под `/Users/axisrow/Projects/claude-tools/`.
+**PROJECT_DIR как маркер** — контракт всего механизма. `hookctl` вычисляет `PROJECT_DIR`
+по своему расположению (`bin/hookctl` → родительский каталог) и распознаёт «свои» хуки по
+`command`, начинающемуся с `PROJECT_DIR/`. Любой другой `command` считается чужим и не
+трогается. В реестре `command` хранится **относительно** `PROJECT_DIR` (portable); в
+`settings.json` hookctl вписывает абсолютный путь (`PROJECT_DIR + command`). Если меняешь
+эту логику — `regenerate` перестанет узнавать свои же хуки и начнёт их дублировать.
 
 `hookctl` запускается через symlink `~/bin/hookctl`, поэтому в начале скрипта стоит
 **разрешение symlink через `readlink`** в цикле — без него `BASH_SOURCE` указал бы на

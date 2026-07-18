@@ -1,11 +1,11 @@
 {
-  "_comment": "Реестр хуков claude-tools. Источник правды для 'своих' хуков. hookctl читает этот файл и перестраивает секцию hooks в ~/.claude/settings.json: удаляет из settings.json только хуки с command из claude-tools/ (маркер '/claude-tools/'), достраивает включённые отсюда, сохраняя все чужие хуки (SessionStart и проч.).",
+  "_comment": "Реестр хуков claude-tools. Источник правды для 'своих' хуков. hookctl читает этот файл и перестраивает секцию hooks в ~/.claude/settings.json: удаляет из settings.json только хуки, чей command ведёт в каталог claude-tools/ (распознавание через PROJECT_DIR), достраивает включённые отсюда, сохраняя все чужие хуки (SessionStart и проч.). command — путь ОТНОСИТЕЛЬНО каталога claude-tools/ (portable); hookctl склеивает PROJECT_DIR + command в абсолютный путь при записи в settings.json.",
   "hooks": [
     {
       "id": "git-branch-guard",
       "event": "PreToolUse",
       "matcher": "Bash",
-      "command": "/Users/axisrow/Projects/claude-tools/hooks/git-branch-guard.sh",
+      "command": "hooks/git-branch-guard.sh",
       "timeout": 5,
       "statusMessage": "Проверка опасной git-операции",
       "enabled": true

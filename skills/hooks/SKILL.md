@@ -9,8 +9,8 @@ argument-hint: "<list | status | on <id> | off <id> | edit [id] | add>"
 
 Тонкая обёртка над `hookctl`. Инструмент живёт в проекте `claude-tools`:
 
-- CLI: `~/bin/hookctl` ( symlink на `/Users/axisrow/Projects/claude-tools/bin/hookctl`)
-- Реестр: `/Users/axisrow/Projects/claude-tools/registry.json`
+- CLI: `~/bin/hookctl` ( symlink на `<claude-tools>/bin/hookctl`)
+- Реестр: `<claude-tools>/registry.json` (каталог, куда клонирован репо claude-tools)
 - Settings: `~/.claude/settings.json` (секция `hooks`)
 
 ## Поведение

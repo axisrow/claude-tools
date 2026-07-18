@@ -41,7 +41,10 @@ SCRIPT_DIR="$(cd "$(dirname "$SELF")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 REGISTRY="$PROJECT_DIR/registry.json"
 SETTINGS="${CLAUDE_SETTINGS:-$HOME/.claude/settings.json}"
-OUR_MARKER="/claude-tools/"
+# Свой хук распознаём по command, начинающемуся с PROJECT_DIR/ (абсолютный путь,
+# который hookctl вписывает в settings.json, склеивая PROJECT_DIR + относительный
+# command из registry.json). Portable: не зависит от /Users/<user>.
+OUR_BASE="$PROJECT_DIR/"
 
 # --- Проверки ---------------------------------------------------------------
 need_jq() {
@@ -57,16 +60,17 @@ regenerate() {
   local tmp
   tmp="$(mktemp)"
   # jq-программа.
-  #   $marker = OUR_MARKER ("/claude-tools/"), $reg = [registry.json].
-  #   (A) из settings.hooks убрать записи с command из claude-tools/ (маркер).
+  #   $base = OUR_BASE (PROJECT_DIR + "/"), $reg = [registry.json].
+  #   (A) из settings.hooks убрать записи с command под PROJECT_DIR/ (свои).
   #   (B) построить нашу секцию из реестра (enabled:true), сгруппировав по event -> matcher.
+  #       command в реестре — ОТНОСИТЕЛЬНЫЙ путь; склеиваем $base + command → абсолютный.
   #   (C) слить: чужие группы события + наша группа.
-  jq --arg marker "$OUR_MARKER" --slurpfile reg "$REGISTRY" '
-    # (A) Вычистить свои hook-записи. hooks: { "<Event>": [ {matcher?, hooks:[...]}, ... ] }.
+  jq --arg base "$OUR_BASE" --slurpfile reg "$REGISTRY" '
+    # (A) Вычистить свои hook-записи (command начинается с PROJECT_DIR/).
     (if has("hooks") and (.hooks | type) == "object" then
        .hooks |= with_entries(
          .value |= if type == "array" then
-           map(.hooks |= (if type == "array" then map(select((.command // "") | test($marker) | not)) else . end))
+           map(.hooks |= (if type == "array" then map(select((.command // "") | startswith($base) | not)) else . end))
            | map(select((.hooks // []) | length > 0))
          else . end
        )
@@ -75,9 +79,9 @@ regenerate() {
     | . as $cleaned
 
     # (B) Наша секция из реестра (enabled:true), группировка по event -> matcher.
-    #     outcmd собирает {type,command,timeout?,statusMessage?}, потом фильтруем null-поля.
+    #     command: $base + относительный путь из реестра → абсолютный для settings.json.
     | ((($reg[0].hooks // []) | map(select(.enabled == true)))
-         | map(. + { outcmd: { type:"command", command:.command,
+         | map(. + { outcmd: { type:"command", command:($base + .command),
                                timeout:(.timeout), statusMessage:(.statusMessage) } })
          | group_by(.event)
          | map({ key: .[0].event,
@@ -143,9 +147,9 @@ cmd_status() {
   if jq -e '.hooks' "$SETTINGS" >/dev/null 2>&1; then
     jq -r '.hooks | to_entries[] | "  \(.key): \(.value | length) групп(а)"' "$SETTINGS"
     echo
-    echo "Свои хуки (command содержит '$OUR_MARKER'):"
+    echo "Свои хуки (command под $OUR_BASE):"
     local n
-    n="$(jq --arg m "$OUR_MARKER" '[.hooks // {} | .. | .command? // empty | select(test($m))] | length' "$SETTINGS")"
+    n="$(jq --arg b "$OUR_BASE" '[.hooks // {} | .. | .command? // empty | select(startswith($b))] | length' "$SETTINGS")"
     echo "    найдено: $n"
   else
     echo "  (секция hooks отсутствует)"
@@ -169,13 +173,14 @@ cmd_add() {
     "id": "my-hook",
     "event": "PreToolUse",
     "matcher": "Bash",
-    "command": "/Users/axisrow/Projects/claude-tools/hooks/my-hook.sh",
+    "command": "hooks/my-hook.sh",
     "timeout": 5,
     "statusMessage": "...",
     "enabled": true
   }
 
 TPL
+  echo "command — путь ОТНОСИТЕЛЬНО каталога claude-tools/ (hookctl склеит с PROJECT_DIR)."
   echo "После правки: hookctl edit   (regenerate встроен в edit/enable/disable)"
 }
 

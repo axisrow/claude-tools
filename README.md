@@ -17,7 +17,7 @@ CLAUDE.md не лечат — агент их игнорирует. Лечит *
 ## Установка
 
 ```bash
-cd /Users/axisrow/Projects/claude-tools
+cd /path/to/claude-tools   # куда клонирован репо
 bash install.sh
 ```
 
@@ -67,15 +67,18 @@ hookctl add                  # подсказка по добавлению но
 `hookctl` — **гибрид реестра и мержа**:
 
 1. `registry.json` — источник правды для **своих** хуков (id, event, matcher, command, enabled).
+   `command` хранится как путь **относительно каталога `claude-tools/`** (portable).
 2. При `enable/disable/add/edit` hookctl **перестраивает** секцию `hooks` в `~/.claude/settings.json`:
-   - удаляет только записи, чей `command` ведёт в `claude-tools/` (маркер «наш»);
-   - достраивает включённые хуки из реестра, группируя по event → matcher;
+   - удаляет только записи, чей `command` ведёт в каталог `claude-tools/` (распознаётся по `PROJECT_DIR`);
+   - достраивает включённые хуки из реестра, группируя по event → matcher, склеивая
+     `PROJECT_DIR + command` в абсолютный путь для `settings.json`;
    - **сливает** с чужими группами — `SessionStart` (context-mode-cache-heal) и любые другие
      остаются нетронутыми.
 3. Все прочие ключи (`env`, `permissions`, `model`, `enabledPlugins` …) сохраняются.
 4. Перед записью — валидация `jq empty` + бэкап `settings.json.bak`.
 
-Маркер «свой/чужой» — подстрока `/claude-tools/` в `command`. Всё, что исполняется не отсюда,
+`PROJECT_DIR` вычисляется hookctl по своему расположению (`bin/hookctl` → родительский каталог),
+поэтому пути portable и не зависят от `/Users/<user>`. Всё, что исполняется не из этого каталога,
 считается чужим и не трогается.
 
 ## Добавить новый хук
