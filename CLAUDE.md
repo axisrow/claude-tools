@@ -61,15 +61,17 @@ done
 `SETTINGS`/`CLAUDE_SETTINGS` (env) переопределяет путь к settings.json — полезно для
 тестов hookctl на копии.
 
-Тесты (новые утилиты):
+Тесты (новые утилиты/хуки):
 
 ```bash
-bash tests/test_timeout_fix.sh            # red-green тесты bin/timeout-fix (на моках)
+bash tests/test_timeout_fix.sh                  # red-green тесты bin/timeout-fix (на моках)
+bash tests/test_one_command_at_a_time.sh        # red-green тесты хука compound-команд (через jq-pipe)
 ```
 
-Тесты гоняют CLI на tmp-копии `settings.json` (`CLAUDE_SETTINGS`) и изолированном
-`HOME` (fakehome), мокая `brew`/`gtimeout` через PATH-подмену. Реальный `brew install`
-в тестах НЕ запускается — это работа ручного прогона (см. принцип выше).
+`test_timeout_fix.sh` гоняет CLI на tmp-копии `settings.json` (`CLAUDE_SETTINGS`) и изолированном
+`HOME` (fakehome), мокая `brew`/`gtimeout` через PATH-подмену. Реальный `brew install` НЕ запускается.
+`test_one_command_at_a_time.sh` гоняет хук через `echo '{...}' | jq-pipe | hook` — **запускать через
+`bash`** (хук использует bash 3.2 массивы/substr, через `zsh` спотыкается).
 
 ## Архитектура (big picture)
 
@@ -131,7 +133,14 @@ bash tests/test_timeout_fix.sh            # red-green тесты bin/timeout-fix
 - Хук сначала проверяет первое слово (`git|gh`), отсеивая алиасы/обёртки.
 - Русские комментарии и пользовательский текст — норма проекта (включая `statusMessage`).
 - При добавлении хука: скрипт в `hooks/` (chmod +x), запись в `registry.json`, затем
-  `hookctl edit` (regenerate встроен) или `hookctl enable <id>`.
+  `hookctl edit` (regenerate встроен) или `hookctl enable <id>`. Новый хук заводи с
+  `"enabled": false` — пусть пользователь включит вручную после ручного тестирования
+  (см. принцип ниже), не навязывай включение по умолчанию.
+- **`one-command-at-a-time.sh` — минимальный V1 (эвристический).** Парсер bash-команд со стеком
+  контекстов; непокрытые конструкции (heredoc/arithmetic/`[[ ]]`/case/ANSI-C) → `ambiguous` → `ask`.
+  Не пытайся покрыть всё сразу — расширяй **только по реальным false-positives** из живой сессии
+  (TDD: тест-first под замеченную боль). Если парсер обрастает исключениями — переходи на
+  `bashlex`/`mvdan/sh`. Known limitations (`bash -c`, `eval`, `ssh`, одиночный `&`) — в README.
 - **Сначала ручное тестирование, потом автоматизация.** Любая новая CLI-утилита/фикс
   сначала прогоняется вручную на боевой системе и проверяется end-to-end, и только
   **после** подтверждения, что поведение верное, добавляется в `install.sh` / автоматические

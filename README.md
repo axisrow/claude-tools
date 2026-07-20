@@ -9,6 +9,8 @@ CLAUDE.md не лечат — агент их игнорирует. Лечит *
 
 - **`hooks/git-branch-guard.sh`** — PreToolUse-хук: спрашивает подтверждение перед опасными
   git/gh-операциями.
+- **`hooks/one-command-at-a-time.sh`** — PreToolUse-хук: спрашивает подтверждение перед compound-
+  командами (`a && b`, `a; b`, `a || b`, `a | b`) — правило «одна bash-команда за раз». См. ниже.
 - **`bin/hookctl`** — управление хуками в `~/.claude/settings.json` (реестр + мерж).
 - **`bin/timeout-fix`** — локальный фикс бага `timeout`/`gtimeout` на macOS (ставит coreutils,
   добавляет gnubin в PATH, поднимает `BASH_MAX_TIMEOUT_MS`). См. ниже.
@@ -44,6 +46,52 @@ bash install.sh
 Логика намеренно простая: **всегда спрашивать**, без сети и `gh`. Лучше один лишний
 диалог, чем закрытый PR. Безопасные операции (`git push <new>`, `pull`, `status`, `gh pr view`)
 проходят без вопросов.
+
+## hooks/one-command-at-a-time — «одна bash-команда за раз»
+
+Правило: модель должна вызывать по одной команде за Bash-call, а не лепить compound
+(`cmd1 && cmd2`, `a; b`, `a || b`, `a | b`). Смешивать — дурной тон. Хук перехватывает compound
+ДО выполнения и спрашивает подтверждение (`permissionDecision: "ask"`).
+
+Включение (по умолчанию выключен — сначала протестируй вручную):
+
+```bash
+hookctl enable one-command-at-a-time
+```
+
+**Что ловит → `ask`** (compound): `a && b`, `a; b`, `a || b`, `a | b`, многострочные команды
+(newline как разделитель), compound внутри `$(…)`/backticks/subshell `(…)`.
+
+**Что пропускает** (clean): одиночные команды; операторы внутри кавычек (`grep 'a && b'`,
+`jq ".a | .b"`, `git commit -m "x && y"`); escaped-операторы (`echo \;`); `#`-внутри-слова
+(`echo foo#bar`).
+
+**Что помечает `ambiguous` → `ask`** (парсер V1 не умеет разбирать, просит проверить вручную):
+heredoc (`<<EOF`), arithmetic (`$((…))`/`((…))`), `[[ … ]]`, `case … in`, ANSI-C `$'…'`, `${…}`.
+
+**Known limitations V1** (не ловит — документировано): `bash -c 'a && b'` / `eval` / `ssh host '…'`
+(compound скрыт в строковом аргументе); одиночный `&` (background).
+
+**Алгоритм:** посимвольный обход со стеком контекстов (SQ/DQ/`$(`/backtick/subshell) на чистом
+bash 3.2 — quote-aware (операторы внутри кавычек игнорируются, внутри `$()` ловятся). Это
+**минимальный V1 — эвристический guardrail, не security boundary**: расширяем по реальным
+false-positives. Первая цель расширения — heredoc (~1% команд). Если парсер начнёт обрастать
+исключениями — переход на [`bashlex`](https://github.com/idank/bashlex) / [`mvdan/sh`](https://github.com/mvdan/sh).
+
+Тесты: `bash tests/test_one_command_at_a_time.sh` (22 кейса: ask/clean/ambiguous).
+
+## Конвенция permission-паттернов (Правило 2 из issue #4)
+
+Не точечный хук, а **конвенция** для `permissions.allow` в `~/.claude/settings.json`:
+
+| Хорошо | Плохо | Почему |
+|---|---|---|
+| `Bash(git add:*)`, `Bash(git diff:*)`, `Bash(git status)`, `Bash(git log:*)` | `Bash(git:*)` | Широкий паттерн разрешает **все** git-подкоманды — включая опасные `push --delete`/`branch -D`/`clean -fd`. Scoped-паттерны пропускают только безопасные. |
+
+Claude Code проверяет каждую subcommand compound против rules
+([docs/permissions](https://code.claude.com/docs/en/permissions#compound-commands)), но широкий
+паттерн всё равно покрывает опасные подкоманды. Автоматический аудит широких паттернов —
+follow-up (issue #6, `bin/permissions-audit`).
 
 ## bin/timeout-fix — фикс бага `timeout` на macOS
 
@@ -149,8 +197,12 @@ claude-tools/
 ├── bin/
 │   ├── hookctl              # управление хуками
 │   └── timeout-fix          # фикс бага timeout на macOS
-├── hooks/git-branch-guard.sh
-├── tests/test_timeout_fix.sh
+├── hooks/
+│   ├── git-branch-guard.sh
+│   └── one-command-at-a-time.sh   # «одна команда за раз»
+├── tests/
+│   ├── test_timeout_fix.sh
+│   └── test_one_command_at_a_time.sh
 └── skills/
     ├── hooks/SKILL.md      # /hooks
     └── fix/SKILL.md        # /fix

@@ -48,3 +48,9 @@ argument-hint: "<list | status | on <id> | off <id> | edit [id] | add>"
   git-операциями: `git push --delete`, `push :branch`, `push --force/-f`,
   `gh pr close --delete-branch`, `git branch -D/-d`. Предотвращает случайное закрытие PR
   из-за удаления head-ветки.
+- `one-command-at-a-time` (PreToolUse / Bash, по умолчанию **off**) — спрашивает подтверждение
+  перед compound-командами (`a && b`, `a; b`, `a || b`, `a | b`, newline, compound в `$(…)`/
+  backtick/subshell). Правило «одна bash-команда за раз». Quote-aware (операторы внутри кавычек
+  игнорируются). Непокрытые конструкции (heredoc/arithmetic/`[[ ]]`/case) → `ambiguous` → `ask`.
+  Known limitations: `bash -c '…'`/`eval`/`ssh`, одиночный `&`. Включать после ручного теста:
+  `hookctl enable one-command-at-a-time`. См. README проекта.

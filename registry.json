@@ -9,6 +9,15 @@
       "timeout": 5,
       "statusMessage": "Проверка опасной git-операции",
       "enabled": true
+    },
+    {
+      "id": "one-command-at-a-time",
+      "event": "PreToolUse",
+      "matcher": "Bash",
+      "command": "hooks/one-command-at-a-time.sh",
+      "timeout": 5,
+      "statusMessage": "Проверка: одна команда за раз",
+      "enabled": false
     }
   ]
 }
