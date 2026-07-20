@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+# permission-mode — безопасная обёртка над правкой боевого ~/.claude/settings.json:
+# выставляет permissions.disableAutoMode: "disable" (запрещает auto-режим Claude Code,
+# который гоняет каждый tool-call через LLM-классификатор и жжёт токены / роняет действия
+# при недоступности классификатора). См. claude-tools#5.
+#
+# НЕ трогает defaultMode/allow/ask — только disableAutoMode. Запрет auto => CC откатится
+# к стандартным запросам подтверждения (default). defaultMode: acceptEdits — отдельное
+# решение пользователя, его тут не задаём.
+#
+# Команды:
+#   permission-mode --check  | -n   показать текущее состояние (on/off), read-only
+#   permission-mode --on            выставить disableAutoMode: "disable"
+#   permission-mode --off           убрать disableAutoMode
+#   permission-mode --help   | -h   эта справка
+#
+# Безопасность боевого settings.json: atomic-правка (mktemp → jq empty → .bak → mv),
+# переиспользуем идиому bin/timeout-fix. Невалидный JSON — отбой, файл не тронут.
+# CLAUDE_SETTINGS env переопределяет путь к settings.json (для тестов на копии).
+set -uo pipefail
+
+SETTINGS="${CLAUDE_SETTINGS:-$HOME/.claude/settings.json}"
+
+die() { echo "permission-mode: $*" >&2; exit 1; }
+
+need_jq() { command -v jq >/dev/null 2>&1 || die "jq не найден. Установите: brew install jq"; }
+need_settings() { [ -f "$SETTINGS" ] || die "settings.json не найден: $SETTINGS"; }
+
+# --- atomic JSON edit (как bin/timeout-fix) ---------------------------------
+# atomic_jq_edit <file> <jq-program> [jq-args...]
+atomic_jq_edit() {
+  local file="$1"; shift
+  local tmp; tmp="$(mktemp)"
+  if ! jq "$@" "$file" >"$tmp" 2>/dev/null; then
+    rm -f "$tmp"
+    echo "permission-mode: ошибка jq над $file" >&2
+    return 1
+  fi
+  if ! jq empty "$tmp" >/dev/null 2>&1; then
+    rm -f "$tmp"
+    echo "permission-mode: результат невалидный JSON — отбой, $file не тронут" >&2
+    return 1
+  fi
+  cp "$file" "$file.bak"
+  mv "$tmp" "$file"
+}
+
+# текущее значение disableAutoMode (пусто если нет)
+current_val() { jq -r '.permissions.disableAutoMode // empty' "$SETTINGS" 2>/dev/null; }
+
+# --- команды ----------------------------------------------------------------
+cmd_check() {
+  local v; v="$(current_val)"
+  if [ "$v" = "disable" ]; then
+    echo "on   — auto-режим запрещён (disableAutoMode: \"disable\")"
+  else
+    echo "off  — auto-режим разрешён (disableAutoMode отсутствует)"
+  fi
+  echo "      settings: $SETTINGS"
+}
+
+cmd_on() {
+  if [ "$(current_val)" = "disable" ]; then
+    echo "Уже включено: disableAutoMode = \"disable\""
+    return 0
+  fi
+  atomic_jq_edit "$SETTINGS" '.permissions.disableAutoMode = "disable"' \
+    || die "не удалось записать disableAutoMode"
+  echo "✓ auto-режим запрещён: permissions.disableAutoMode = \"disable\""
+  echo "  (бэкап: $SETTINGS.bak). Перезапусти Claude Code, чтобы изменение вступило в силу."
+}
+
+cmd_off() {
+  if [ -z "$(current_val)" ]; then
+    echo "Уже выключено: disableAutoMode отсутствует"
+    return 0
+  fi
+  atomic_jq_edit "$SETTINGS" 'del(.permissions.disableAutoMode)' \
+    || die "не удалось удалить disableAutoMode"
+  echo "✓ auto-режим снова разрешён: disableAutoMode удалён"
+  echo "  (бэкап: $SETTINGS.bak). Перезапусти Claude Code, чтобы изменение вступило в силу."
+}
+
+usage() {
+  cat <<EOF
+permission-mode — запрет auto-режима Claude Code (отключение LLM-классификатора tool-call'ов).
+См. claude-tools#5.
+
+  permission-mode --check  | -n   показать состояние (on/off), read-only
+  permission-mode --on            выставить permissions.disableAutoMode: "disable"
+  permission-mode --off           убрать disableAutoMode
+  permission-mode --help   | -h   эта справка
+
+Что делает: запрещает auto-режим (permission rules всё ещё работают — CC откатится к
+стандартным запросам подтверждения). НЕ трогает defaultMode/allow/ask.
+
+Settings:  $SETTINGS  (переопределить через CLAUDE_SETTINGS)
+EOF
+}
+
+# --- dispatch ---------------------------------------------------------------
+need_jq
+need_settings
+
+case "${1:-}" in
+  --check|-n) cmd_check ;;
+  --on)       cmd_on ;;
+  --off)      cmd_off ;;
+  --help|-h|"") usage ;;
+  *) echo "permission-mode: неизвестная команда: $1" >&2; usage; exit 1 ;;
+esac
