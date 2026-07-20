@@ -1,0 +1,194 @@
+#!/usr/bin/env bash
+# timeout-fix — локальный фикс upstream-бага Claude Code на macOS:
+# модель обёртывает команды в `timeout`/`gtimeout`, которых нет (coreutils не установлен).
+# См. claude-tools#2 → anthropics/claude-code #3361 / #10600 / #79056.
+#
+# Делает (idempotent):
+#   1. brew install coreutils          → ставит gtimeout (+ timeout через gnubin в PATH).
+#   2. gnubin в PATH через ~/.zshrc    → безпрефиксный `timeout` разрешается.
+#   3. env.BASH_MAX_TIMEOUT_MS=settings → харнесс не убивает команду раньше внешнего timeout.
+#
+# По умолчанию: check + apply. --check/-n — только проверка (read-only).
+# --value <ms> — переопределить дефолт 600000.
+#
+# Архитектура: переиспользует идиомы hookctl (readlink symlink-resolve, SETTINGS через
+# CLAUDE_SETTINGS, атомарная правка JSON: mktemp → jq empty → .bak → mv).
+set -uo pipefail
+
+# --- PROJECT_DIR через readlink (как hookctl: запуск через ~/bin/timeout-fix) ---
+SELF="${BASH_SOURCE[0]}"
+while [ -L "$SELF" ]; do
+  DIR="$(cd "$(dirname "$SELF")" >/dev/null 2>&1 && pwd)"
+  SELF="$(readlink "$SELF")"
+  case "$SELF" in
+    /*) : ;;
+    *) SELF="$DIR/$SELF" ;;
+  esac
+done
+SCRIPT_DIR="$(cd "$(dirname "$SELF")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+SETTINGS="${CLAUDE_SETTINGS:-$HOME/.claude/settings.json}"
+ZSHRC="${ZSHRC:-$HOME/.zshrc}"
+DESIRED_TIMEOUT_MS=600000
+GNUBIN_MARKER="claude-tools/timeout-fix"
+
+# --- проверка зависимостей ---------------------------------------------------
+die() { echo "timeout-fix: $*" >&2; exit 1; }
+
+have() { command -v "$1" >/dev/null 2>&1; }   # have <cmd>
+
+need_jq() {
+  have jq || die "jq не найден. Установите: brew install jq"
+}
+
+# --- atomic JSON edit: mktemp → jq empty → .bak → mv (как hookctl regenerate) ---
+# atomic_jq_edit <file> <jq-program> [jq-args...]
+# Применяет jq-program к file, валидирует, бэкапит .bak, атомарно заменяет.
+atomic_jq_edit() {
+  local file="$1"; shift
+  local tmp; tmp="$(mktemp)"
+  if ! jq "$@" "$file" >"$tmp" 2>/dev/null; then
+    rm -f "$tmp"
+    echo "timeout-fix: ошибка jq над $file" >&2
+    return 1
+  fi
+  if ! jq empty "$tmp" >/dev/null 2>&1; then
+    rm -f "$tmp"
+    echo "timeout-fix: результат невалидный JSON — отбой, $file не тронут" >&2
+    return 1
+  fi
+  cp "$file" "$file.bak"
+  mv "$tmp" "$file"
+}
+
+# --- проверки состояния (true/false через exit code) -------------------------
+# coreutils установлен?
+coreutils_installed() {
+  have brew && brew list coreutils >/dev/null 2>&1
+}
+
+# gnubin уже прописан в zshrc (по маркеру)?
+gnubin_in_zshrc() {
+  [ -f "$ZSHRC" ] && grep -q "$GNUBIN_MARKER" "$ZSHRC" 2>/dev/null
+}
+
+# env.BASH_MAX_TIMEOUT_MS >= DESIRED (или отсутствует — тогда нужна установка)?
+env_timeout_ok() {
+  local cur; cur="$(jq -r '.env.BASH_MAX_TIMEOUT_MS // empty' "$SETTINGS" 2>/dev/null)"
+  [ -n "$cur" ] && [ "$cur" -ge "$DESIRED_TIMEOUT_MS" ] 2>/dev/null
+}
+
+# --- применение (apply-шаги) -------------------------------------------------
+ensure_coreutils() {
+  if coreutils_installed; then
+    echo "✓ coreutils установлен"
+    return 0
+  fi
+  have brew || die "brew не найден. Установите Homebrew: https://brew.sh"
+  echo "brew install coreutils …"
+  brew install coreutils >/dev/null 2>&1 || die "brew install coreutils не удался"
+  coreutils_installed || die "coreutils всё ещё не установлен после brew install"
+  echo "✓ coreutils установлен"
+}
+
+ensure_gnubin_path() {
+  if gnubin_in_zshrc; then
+    echo "✓ gnubin уже в $ZSHRC"
+    return 0
+  fi
+  have brew || die "brew не найден (нужен для brew --prefix coreutils)"
+  local prefix; prefix="$(brew --prefix coreutils 2>/dev/null)"
+  [ -n "$prefix" ] || die "не удалось определить brew --prefix coreutils"
+  local gnubin="$prefix/libexec/gnubin"
+  [ -d "$gnubin" ] || die "gnubin-директория не найдена: $gnubin (coreutils установлен?)"
+  # бэкап zshrc (если существует), далее атомарно дописываем строку.
+  [ -f "$ZSHRC" ] && cp "$ZSHRC" "$ZSHRC.bak"
+  {
+    echo ''
+    echo "# claude-tools timeout-fix: безпрефиксный timeout (GNU coreutils)"
+    echo "export PATH=\"$gnubin:\$PATH\"  # $GNUBIN_MARKER"
+  } >>"$ZSHRC"
+  echo "✓ gnubin добавлен в $ZSHRC (вступит в силу в новых zsh-сессиях: source $ZSHRC)"
+}
+
+ensure_env_timeout() {
+  if env_timeout_ok; then
+    echo "✓ env.BASH_MAX_TIMEOUT_MS >= $DESIRED_TIMEOUT_MS"
+    return 0
+  fi
+  [ -f "$SETTINGS" ] || die "settings.json не найден: $SETTINGS"
+  atomic_jq_edit "$SETTINGS" --arg v "$DESIRED_TIMEOUT_MS" \
+    '.env = ((.env // {}) + {BASH_MAX_TIMEOUT_MS: $v})' \
+    || die "не удалось записать env.BASH_MAX_TIMEOUT_MS"
+  echo "✓ env.BASH_MAX_TIMEOUT_MS = $DESIRED_TIMEOUT_MS (в $SETTINGS)"
+}
+
+# --- команды -----------------------------------------------------------------
+cmd_check() {
+  local problems=0
+  coreutils_installed           || { echo "✗ coreutils не установлен"; problems=$((problems+1)); }
+  gnubin_in_zshrc               || { echo "✗ gnubin не в $ZSHRC"; problems=$((problems+1)); }
+  env_timeout_ok                || { echo "✗ env.BASH_MAX_TIMEOUT_MS < $DESIRED_TIMEOUT_MS (или отсутствует)"; problems=$((problems+1)); }
+  if [ "$problems" -eq 0 ]; then
+    echo "✓ всё настроено"
+    return 0
+  fi
+  return 1
+}
+
+cmd_run() {
+  ensure_coreutils
+  ensure_gnubin_path
+  ensure_env_timeout
+  echo
+  echo "Готово. Проверка: timeout-fix --check"
+}
+
+usage() {
+  local marker="$GNUBIN_MARKER"
+  cat <<EOF
+timeout-fix — локальный фикс бага \`timeout\`/\`gtimeout\` Claude Code на macOS.
+См. claude-tools#2 → anthropics/claude-code #3361 / #10600 / #79056.
+
+  timeout-fix                 проверить и применить все три шага (idempotent)
+  timeout-fix --check  | -n   только проверка, ничего не менять (read-only)
+  timeout-fix --value <ms>    переопределить дефолт BASH_MAX_TIMEOUT_MS (600000)
+  timeout-fix --help   | -h   эта справка
+
+Что делает:
+  1. brew install coreutils (ставит gtimeout + timeout через gnubin)
+  2. добавляет \$(brew --prefix coreutils)/libexec/gnubin в PATH через $ZSHRC
+  3. env.BASH_MAX_TIMEOUT_MS = <ms> (дефолт 600000) в $SETTINGS
+
+ВНИМАНИЕ (сайд-эффект шага 2): gnubin в PATH меняет ls/cp/mv/rm и др. на GNU-версии
+глобально для новых zsh-сессий. Откат: удалить из $ZSHRC строку с маркером
+${marker} и перезапустить шелл.
+
+Settings:  $SETTINGS  (переопределить через CLAUDE_SETTINGS)
+Zshrc:     $ZSHRC     (переопределить через ZSHRC)
+EOF
+}
+
+# --- dispatch ----------------------------------------------------------------
+ACTION="run"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --check|-n) ACTION="check"; shift ;;
+    --value)
+      [ $# -ge 2 ] || { echo "usage: timeout-fix --value <ms>" >&2; exit 1; }
+      case "$2" in
+        ''|*[!0-9]*) echo "timeout-fix: --value ожидает положительное целое (мс), получено: '$2'" >&2; exit 1 ;;
+      esac
+      DESIRED_TIMEOUT_MS="$2"; shift 2 ;;
+    --help|-h|help) usage; exit 0 ;;
+    run) ACTION="run"; shift ;;
+    *) echo "timeout-fix: неизвестный аргумент: $1" >&2; usage; exit 1 ;;
+  esac
+done
+
+need_jq
+case "$ACTION" in
+  check) cmd_check ;;
+  run)   cmd_run ;;
+esac
