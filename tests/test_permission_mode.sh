@@ -105,7 +105,6 @@ t4_on_preserves_others() {
 t5_on_idempotent() {
   setup
   run_cli --on >/dev/null 2>&1
-  local bak1; bak1=$(stat -f "%m" "$SETTINGS_TEST.bak" 2>/dev/null)
   run_cli --on >/dev/null 2>&1; local rc=$?
   assert_eq 0 "$rc" "t5: повторный --on exit 0"
   assert_eq "disable" "$(cur_val)" "t5: значение стабильно"
@@ -132,13 +131,20 @@ t7_off_noop_when_absent() {
   teardown
 }
 
-# 8. невалидный JSON → отбой (exit ≠0), файл НЕ тронут.
+# 8. невалидный JSON → отбой loudly на ВСЕХ командах (FIX H1: --check/--off/--on), файл НЕ тронут.
 t8_invalid_json_guard() {
   setup
   echo '{bad json' >"$SETTINGS_TEST"
   local before; before=$(cat "$SETTINGS_TEST")
-  run_cli --on >/dev/null 2>&1; local rc=$?
-  if [ "$rc" != "0" ]; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); FAILED_TESTS+=("t8: --on на невалидном JSON должен фейлить, exit=$rc"); fi
+  # --on
+  run_cli --on >/dev/null 2>&1; local rc_on=$?
+  if [ "$rc_on" != "0" ]; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); FAILED_TESTS+=("t8a: --on на невалидном JSON должен фейлить, exit=$rc_on"); fi
+  # --off (FIX H1: раньше молча no-op exit 0)
+  run_cli --off >/dev/null 2>&1; local rc_off=$?
+  if [ "$rc_off" != "0" ]; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); FAILED_TESTS+=("t8b: --off на невалидном JSON должен фейлить (FIX H1), exit=$rc_off"); fi
+  # --check (FIX H1: раньше говорил "off" на сломанном файле)
+  run_cli --check >/dev/null 2>&1; local rc_chk=$?
+  if [ "$rc_chk" != "0" ]; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); FAILED_TESTS+=("t8c: --check на невалидном JSON должен фейлить (FIX H1), exit=$rc_chk"); fi
   assert_eq "$before" "$(cat "$SETTINGS_TEST")" "t8: невалидный файл не тронут"
   teardown
 }
@@ -151,10 +157,28 @@ t9_no_jq() {
   teardown
 }
 
+# 10. cp .bak падает → mv НЕ выполняется, файл НЕ перезаписан, exit ≠0 (FIX C1).
+t10_cp_failure_fail_closed() {
+  setup
+  # Мокаем cp чтобы он падал: кладём фейковый cp в PATH-подмножество.
+  local fakebin="$WORK/fakebin"; mkdir -p "$fakebin"
+  cat >"$fakebin/cp" <<'EOF'
+#!/usr/bin/env bash
+echo "cp-mock: forced failure" >&2
+exit 1
+EOF
+  chmod +x "$fakebin/cp"
+  local before; before=$(cat "$SETTINGS_TEST")
+  PATH="$fakebin:$PATH" run_cli --on >/dev/null 2>&1; local rc=$?
+  if [ "$rc" != "0" ]; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); FAILED_TESTS+=("t10: cp-failure должен фейлить (FIX C1), exit=$rc"); fi
+  assert_eq "$before" "$(cat "$SETTINGS_TEST")" "t10: файл НЕ перезаписан без .bak (FIX C1)"
+  teardown
+}
+
 # --- раннер -----------------------------------------------------------------
 for t in t1_check_off_when_absent t2_check_on_when_set t3_on_sets_and_baks \
          t4_on_preserves_others t5_on_idempotent t6_off_removes \
-         t7_off_noop_when_absent t8_invalid_json_guard t9_no_jq; do
+         t7_off_noop_when_absent t8_invalid_json_guard t9_no_jq t10_cp_failure_fail_closed; do
   "$t"
 done
 

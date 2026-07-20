@@ -24,7 +24,12 @@ SETTINGS="${CLAUDE_SETTINGS:-$HOME/.claude/settings.json}"
 die() { echo "permission-mode: $*" >&2; exit 1; }
 
 need_jq() { command -v jq >/dev/null 2>&1 || die "jq не найден. Установите: brew install jq"; }
-need_settings() { [ -f "$SETTINGS" ] || die "settings.json не найден: $SETTINGS"; }
+need_settings() {
+  [ -f "$SETTINGS" ] || die "settings.json не найден: $SETTINGS"
+  # Невалидный JSON — отбой loudly на ЛЮБОЙ команде (иначе --check молча скажет "off",
+  # а --off сделает no-op exit 0 на уже сломанном файле). См. review PR#10.
+  jq empty "$SETTINGS" >/dev/null 2>&1 || die "settings.json невалидный JSON: $SETTINGS — почини вручную (или откатись из .bak)"
+}
 
 # --- atomic JSON edit (как bin/timeout-fix) ---------------------------------
 # atomic_jq_edit <file> <jq-program> [jq-args...]
@@ -41,8 +46,8 @@ atomic_jq_edit() {
     echo "permission-mode: результат невалидный JSON — отбой, $file не тронут" >&2
     return 1
   fi
-  cp "$file" "$file.bak"
-  mv "$tmp" "$file"
+  cp "$file" "$file.bak" || { rm -f "$tmp"; echo "permission-mode: не удалось создать .bak — отбой, $file не тронут" >&2; return 1; }
+  mv "$tmp" "$file"      || { echo "permission-mode: не удалось заменить $file (.bak создан, откатись вручную)" >&2; return 1; }
 }
 
 # текущее значение disableAutoMode (пусто если нет)
