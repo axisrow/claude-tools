@@ -184,25 +184,28 @@ cmd_audit_env() {
 }
 
 # --- cleanup (atomic, .bak) -------------------------------------------------
-# удалить deprecated/compound, дедуп.
+# удалить ТОЛЬКО deprecated/compound, дедуп.
+# ВАЖНО: широкие валидные паттерны (warn-danger/error: Bash(git:*), Bash(*)) НЕ трогать —
+# это рабочие правила, cleanup не генерирует scoped-замены (это работа audit/человека).
+# Иначе пользователь потеряет allow-правило → сломанная CC-сессия. (Codex review PR#11)
 cmd_cleanup() {
-  # фильтр на bash: оставить только entries, где classify вернёт пусто (safe/ok)
-  # собираем новый allow через jq-программу, фильтруя по bash-функции — сложно;
-  # проще: прочитать allow, отфильтровать построчно, собрать JSON.
   local tmp_allow; tmp_allow="$(mktemp)"
-  local n i=0 entry verdict kept=0
+  local n i=0 entry verdict
   n=$(jq -r '.permissions.allow | length' "$SETTINGS" 2>/dev/null || echo 0)
-  # пишем валидные entries построчно, потом соберём JSON
   while [ "$i" -lt "$n" ]; do
     entry=$(jq -r ".permissions.allow[$i]" "$SETTINGS")
     verdict="$(classify "$entry")"
-    if [ -z "$verdict" ]; then printf '%s\n' "$entry" >>"$tmp_allow"; kept=$((kept+1)); fi
+    # оставить если: clean (нет verdict) ИЛИ широкое правило (warn-danger/error) — НЕ deprecated.
+    case "$verdict" in
+      ''|warn-danger:*|error:*)
+        printf '%s\n' "$entry" >>"$tmp_allow" ;;
+      warn-deprecated:*)
+        : ;;   # удаляем только deprecated/compound (финальный счётчик ниже)
+    esac
     i=$((i+1))
   done
-  # дедуп (unique с сохранением порядка)
   local tmp_dedup; tmp_dedup="$(mktemp)"
   awk '!seen[$0]++' "$tmp_allow" >"$tmp_dedup"
-  # собрать новый allow как JSON-массив
   local new_allow_json; new_allow_json=$(jq -R -s 'split("\n") | map(select(length>0))' "$tmp_dedup")
   rm -f "$tmp_allow" "$tmp_dedup"
   # atomic-запись: заменить .permissions.allow

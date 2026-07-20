@@ -180,10 +180,26 @@ JSON
   teardown
 }
 
+# 11. cleanup НЕ удаляет широкие валидные паттерны Bash(git:*)/Bash(*) — только deprecated.
+# (Codex review PR#11: cleanup не должен выкидывать рабочие allow-правила без замены.)
+t11_cleanup_keeps_wide() {
+  setup
+  seed <<'JSON'
+{"permissions":{"allow":["Bash(git:*)","Bash(*)","Bash(cd /x)","Bash(sleep:*)"]}}
+JSON
+  run_cli cleanup >/dev/null 2>&1
+  local allow; allow=$(jq -r '.permissions.allow[]' "$SETTINGS_TEST")
+  contains "git:*" "$allow" "t11a: Bash(git:*) сохранён (НЕ удалён cleanup'ом)"
+  contains "Bash(*)" "$allow" "t11b: Bash(*) сохранён"
+  not_contains "cd /x" "$allow" "t11c: deprecated cd /x удалён"
+  teardown
+}
+
+
 # --- раннер -----------------------------------------------------------------
 for t in t1_wide_git_warn t2_full_wildcard_error t3_safe_wildcard_no_warn \
          t4_scoped_ok t5_deprecated_warn t6_env_secret_warn_no_value t7_clean_exit0 \
-         t8_cleanup_removes t9_cleanup_dedup t10_cleanup_idempotent; do
+         t8_cleanup_removes t9_cleanup_dedup t10_cleanup_idempotent t11_cleanup_keeps_wide; do
   "$t"
 done
 
