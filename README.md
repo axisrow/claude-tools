@@ -10,9 +10,12 @@ CLAUDE.md не лечат — агент их игнорирует. Лечит *
 - **`hooks/git-branch-guard.sh`** — PreToolUse-хук: спрашивает подтверждение перед опасными
   git/gh-операциями.
 - **`bin/hookctl`** — управление хуками в `~/.claude/settings.json` (реестр + мерж).
+- **`bin/timeout-fix`** — локальный фикс бага `timeout`/`gtimeout` на macOS (ставит coreutils,
+  добавляет gnubin в PATH, поднимает `BASH_MAX_TIMEOUT_MS`). См. ниже.
 - **`registry.json`** — источник правды для своих хуков.
 - **`skills/hooks/`** — slash-скилл `/hooks` (обёртка над hookctl).
 - **`skills/fix/`** — slash-скилл `/fix` (багфикс по строгому TDD).
+- **`tests/`** — bash-тесты (без фреймворка) для утилит `bin/`.
 
 ## Установка
 
@@ -41,6 +44,43 @@ bash install.sh
 Логика намеренно простая: **всегда спрашивать**, без сети и `gh`. Лучше один лишний
 диалог, чем закрытый PR. Безопасные операции (`git push <new>`, `pull`, `status`, `gh pr view`)
 проходят без вопросов.
+
+## bin/timeout-fix — фикс бага `timeout` на macOS
+
+Claude Code на macOS упорно обёртывает команды в `timeout N`/`gtimeout N`, которых нет
+(coreutils не установлен по умолчанию). Модель жжёт токены на `command not found: timeout`
+и иногда галлюцинирует успех. Это upstream-баг ([anthropics/claude-code#3361](https://github.com/anthropics/claude-code/issues/3361),
+[#10600](https://github.com/anthropics/claude-code/issues/10600), [#79056](https://github.com/anthropics/claude-code/issues/79056)),
+закрытый ботами без фикса.
+
+`bin/timeout-fix` применяет локальный обходный путь (без хука):
+
+1. `brew install coreutils` — ставит `gtimeout` (+ `timeout` через gnubin).
+2. Добавляет `$(brew --prefix coreutils)/libexec/gnubin` в `PATH` через `~/.zshrc`, чтобы
+   безпрефиксный `timeout` разрешался (Claude Code запускает команды через login `zsh`,
+   который грузит `~/.zshrc` — значит фикс доходит до subprocess'ов CC).
+3. Ставит `env.BASH_MAX_TIMEOUT_MS=600000` в `~/.claude/settings.json`, чтобы харнесс не
+   убивал команду раньше внешнего `timeout`.
+
+```bash
+bin/timeout-fix --check       # только диагностика (read-only): что ок, чего не хватает
+bin/timeout-fix               # применить недостающее (idempotent, с бэкапами .bak)
+bin/timeout-fix --value 900000   # переопределить дефолт 600000
+```
+
+**Сайд-эффект шага 2:** добавление `gnubin` в `PATH` меняет `ls`/`cp`/`mv`/`rm` и другие
+утилиты на GNU-версии глобально для новых zsh-сессий (BSD → GNU семантика). Откат: удалить
+из `~/.zshrc` строку с маркером `# claude-tools/timeout-fix` и перезапустить шелл.
+
+## Тесты
+
+```bash
+bash tests/test_timeout_fix.sh    # red-green тесты bin/timeout-fix (на моках, без боя)
+```
+
+Тесты гоняют CLI на tmp-копии `settings.json` и изолированном `HOME`, мокая `brew`/`gtimeout`
+через PATH-подмену. Реальный `brew install` в тестах **не запускается** — перед интеграцией
+в `install.sh` утилита прогоняется вручную на боевой системе (принцип в `CLAUDE.md`).
 
 ## Управление хуками
 
@@ -106,8 +146,11 @@ claude-tools/
 ├── README.md
 ├── install.sh
 ├── registry.json
-├── bin/hookctl
+├── bin/
+│   ├── hookctl              # управление хуками
+│   └── timeout-fix          # фикс бага timeout на macOS
 ├── hooks/git-branch-guard.sh
+├── tests/test_timeout_fix.sh
 └── skills/
     ├── hooks/SKILL.md      # /hooks
     └── fix/SKILL.md        # /fix
