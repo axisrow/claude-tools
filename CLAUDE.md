@@ -65,11 +65,13 @@ done
 
 ```bash
 bash tests/test_timeout_fix.sh                  # red-green тесты bin/timeout-fix (на моках)
+bash tests/test_permission_mode.sh              # red-green тесты bin/permission-mode (на tmp-копии settings.json)
 bash tests/test_one_command_at_a_time.sh        # red-green тесты хука compound-команд (через jq-pipe)
 ```
 
-`test_timeout_fix.sh` гоняет CLI на tmp-копии `settings.json` (`CLAUDE_SETTINGS`) и изолированном
-`HOME` (fakehome), мокая `brew`/`gtimeout` через PATH-подмену. Реальный `brew install` НЕ запускается.
+`test_timeout_fix.sh` / `test_permission_mode.sh` гоняют CLI на tmp-копии `settings.json`
+(`CLAUDE_SETTINGS`) — боевой файл НЕ трогается. `test_timeout_fix.sh` additionally изолирует
+`HOME` (fakehome) и мокает `brew`/`gtimeout` через PATH-подмену.
 `test_one_command_at_a_time.sh` гоняет хук через `echo '{...}' | jq-pipe | hook` — **запускать через
 `bash`** (хук использует bash 3.2 массивы/substr, через `zsh` спотыкается).
 

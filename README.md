@@ -14,6 +14,8 @@ CLAUDE.md не лечат — агент их игнорирует. Лечит *
 - **`bin/hookctl`** — управление хуками в `~/.claude/settings.json` (реестр + мерж).
 - **`bin/timeout-fix`** — локальный фикс бага `timeout`/`gtimeout` на macOS (ставит coreutils,
   добавляет gnubin в PATH, поднимает `BASH_MAX_TIMEOUT_MS`). См. ниже.
+- **`bin/permission-mode`** — отключение auto-классификатора (`disableAutoMode: "disable"`).
+  Безопасная atomic-правка `settings.json`. См. ниже.
 - **`registry.json`** — источник правды для своих хуков.
 - **`skills/hooks/`** — slash-скилл `/hooks` (обёртка над hookctl).
 - **`skills/fix/`** — slash-скилл `/fix` (багфикс по строгому TDD).
@@ -92,6 +94,28 @@ Claude Code проверяет каждую subcommand compound против rul
 ([docs/permissions](https://code.claude.com/docs/en/permissions#compound-commands)), но широкий
 паттерн всё равно покрывает опасные подкоманды. Автоматический аудит широких паттернов —
 follow-up (issue #6, `bin/permissions-audit`).
+
+## bin/permission-mode — отключение auto-классификатора
+
+Auto-режим Claude Code (`permissions.defaultMode: "auto"`) гоняет **каждый** tool-call через
+LLM-классификатор на основном бэкенде сессии — жжёт токены, добавляет задержку, а при
+недоступности классификатора блокирует действие (`glm-5-turbo[1m] is temporarily unavailable, so
+auto mode cannot determine the safety`). В `/settings` GUI одной кнопки это не выключить.
+См. [axisrow/claude-tools#5](https://github.com/axisrow/claude-tools/issues/5),
+upstream [anthropics/claude-code#69002](https://github.com/anthropics/claude-code/issues/69002).
+
+`bin/permission-mode` — безопасная обёртка: выставляет `permissions.disableAutoMode: "disable"`
+в `~/.claude/settings.json` (atomic-правка + `.bak` + валидация, как `bin/timeout-fix`).
+
+```bash
+bin/permission-mode --check     # показать состояние (on/off), read-only
+bin/permission-mode --on        # запретить auto-режим (disableAutoMode: "disable")
+bin/permission-mode --off       # разрешить обратно (убрать disableAutoMode)
+```
+
+Запрещает auto-режим — CC откатится к стандартным запросам подтверждения (permission rules
+продолжают работать). **НЕ трогает** `defaultMode`/`allow`/`ask`. После `--on`/`--off` —
+перезапусти Claude Code. Тесты: `bash tests/test_permission_mode.sh`.
 
 ## bin/timeout-fix — фикс бага `timeout` на macOS
 
@@ -196,6 +220,7 @@ claude-tools/
 ├── registry.json
 ├── bin/
 │   ├── hookctl              # управление хуками
+│   ├── permission-mode      # отключение auto-классификатора
 │   └── timeout-fix          # фикс бага timeout на macOS
 ├── hooks/
 │   ├── git-branch-guard.sh
