@@ -114,7 +114,7 @@ parse() {
     # Контекст DQ: внутри разбираем $(`/backticks, escape над " ` $ \.
     if [ "$TOP" = "DQ" ]; then
       case "$c" in
-        '\') escape=1; i=$((i+2)); continue ;;
+        '\') escape=1; i=$((i+1)); continue ;;
         '"') stack_pop; i=$((i+1)); continue ;;
         '`') stack_push BT; word_start=1; i=$((i+1)); continue ;;
         '$')
@@ -132,7 +132,7 @@ parse() {
 
     # Контекст CS/BT/SS/empty — shell-активный. Операторы исполняются (→ compound) если is_live.
     case "$c" in
-      '\') escape=1; word_start=0; i=$((i+2)); continue ;;
+      '\') escape=1; word_start=0; i=$((i+1)); continue ;;
       "'") stack_push SQ; word_start=1; i=$((i+1)); continue ;;
       '"') stack_push DQ; word_start=1; i=$((i+1)); continue ;;
       '`') stack_push BT; word_start=1; i=$((i+1)); continue ;;

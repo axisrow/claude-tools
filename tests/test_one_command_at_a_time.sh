@@ -63,6 +63,7 @@ assert_ask "тройной &&"              'a && b && c'
 assert_ask "compound внутри \$()"    'echo "$(a && b)"'
 assert_ask "оператор после комментария" 'echo a && echo b # comment'
 assert_ask "newline = разделитель"   $'echo a\necho b'
+assert_ask "line-continuation \\<NL>&&" $'echo a \\\n&& echo b'
 assert_ask "compound в subshell ()"  '(a && b)'
 assert_ask "backtick compound"       'echo `a && b`'
 
