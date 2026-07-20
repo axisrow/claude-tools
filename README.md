@@ -16,6 +16,8 @@ CLAUDE.md не лечат — агент их игнорирует. Лечит *
   добавляет gnubin в PATH, поднимает `BASH_MAX_TIMEOUT_MS`). См. ниже.
 - **`bin/permission-mode`** — отключение auto-классификатора (`disableAutoMode: "disable"`).
   Безопасная atomic-правка `settings.json`. См. ниже.
+- **`bin/permissions-audit`** — аудит + чистка `permissions.allow`: детектит слишком широкие
+  паттерны (`Bash(git:*)`/`Bash(*)`) и секреты в `env`, чистит deprecated/compound мусор. См. ниже.
 - **`registry.json`** — источник правды для своих хуков.
 - **`skills/hooks/`** — slash-скилл `/hooks` (обёртка над hookctl).
 - **`skills/fix/`** — slash-скилл `/fix` (багфикс по строгому TDD).
@@ -116,6 +118,30 @@ bin/permission-mode --off       # разрешить обратно (убрат�
 Запрещает auto-режим — CC откатится к стандартным запросам подтверждения (permission rules
 продолжают работать). **НЕ трогает** `defaultMode`/`allow`/`ask`. После `--on`/`--off` —
 перезапусти Claude Code. Тесты: `bash tests/test_permission_mode.sh`.
+
+## bin/permissions-audit — аудит и чистка permissions
+
+Широкие wildcard-паттерны (`Bash(git:*)`/`Bash(node:*)`/`Bash(*)`) разрешают **все** подкоманды —
+включая опасные `git push --delete` (закрывает PR), `git clean -fd`, arbitrary node. Scoped-паттерны
+(`Bash(git add:*)`) безопаснее. `Bash(*:*)` — вообще полный wildcard. Параллельно `permissions.allow`
+обрастает мусором (compound `&&`, deprecated `cd`/`claude`, дубли). См. [axisrow/claude-tools#6](https://github.com/axisrow/claude-tools/issues/6).
+
+```bash
+bin/permissions-audit audit      # аудит (read-only, default): широкие паттерны + deprecated + секреты
+bin/permissions-audit cleanup    # удалить deprecated/compound + дедуп (atomic, .bak)
+```
+
+**audit** репортит: `Bash(<cmd>:*)` для опасных команд (git/gh/node/npm/...) → warn + scoped-альтернатива;
+`Bash(*)`/`Bash(*:*)` → error; compound/deprecated → warn; секрет в `env` (`*TOKEN*`/`*KEY*`/...) → warn
+(**значение НЕ печатается**). Exit 0 если чисто, 1 если есть проблемы.
+
+**cleanup** удаляет deprecated/compound и дедуплит (atomic + `.bak`, fail-closed как `permission-mode`).
+**НЕ делает merge** (сворачивание дубли в wildcard) — это отдельный плагин `permissions-optimizer`.
+
+Конфиг: `permissions-audit.conf` рядом (опасные команды + scoped-альтернативы + deprecated-regex);
+переопределить через `PERMISSIONS_AUDIT_CONF`. Правила заимствованы из `permissions-optimizer`.
+Тесты: `bash tests/test_permissions_audit.sh` (22 кейса: audit/cleanup, изоляция через `CLAUDE_SETTINGS`).
+
 
 ## bin/timeout-fix — фикс бага `timeout` на macOS
 
@@ -221,12 +247,16 @@ claude-tools/
 ├── bin/
 │   ├── hookctl              # управление хуками
 │   ├── permission-mode      # отключение auto-классификатора
+│   ├── permissions-audit    # аудит + чистка permissions.allow
 │   └── timeout-fix          # фикс бага timeout на macOS
+├── permissions-audit.conf   # конфиг: опасные команды + scoped + deprecated-regex
 ├── hooks/
 │   ├── git-branch-guard.sh
 │   └── one-command-at-a-time.sh   # «одна команда за раз»
 ├── tests/
 │   ├── test_timeout_fix.sh
+│   ├── test_permission_mode.sh
+│   ├── test_permissions_audit.sh
 │   └── test_one_command_at_a_time.sh
 └── skills/
     ├── hooks/SKILL.md      # /hooks
