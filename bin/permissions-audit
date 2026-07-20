@@ -1,0 +1,245 @@
+#!/usr/bin/env bash
+# permissions-audit — аудит и чистка permissions.allow в ~/.claude/settings.json.
+#
+# Две операции:
+#   audit    (read-only, default): детектит слишком широкие паттерны (Bash(git:*)/Bash(*:*)/Bash(*)),
+#            deprecated/compound мусор, и секреты в env. НЕ печатает значения секретов.
+#            exit 0 если чисто, 1 если есть error/warn.
+#   cleanup  (atomic, .bak): удаляет deprecated/compound и дедуплит. НЕ делает merge
+#            (сворачивание дубли в wildcard) — это работа permissions-optimizer.
+#
+# Заимствует правила из permissions-optimizer (axisrow/permissions-optimizer, optimize.py).
+# Конфиг: permissions-audit.conf рядом (env PERMISSIONS_AUDIT_CONF переопределяет).
+# См. claude-tools#6.
+set -uo pipefail
+
+SETTINGS="${CLAUDE_SETTINGS:-$HOME/.claude/settings.json}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CONF="${PERMISSIONS_AUDIT_CONF:-$SCRIPT_DIR/../permissions-audit.conf}"
+
+die() { echo "permissions-audit: $*" >&2; exit 2; }
+need_jq() { command -v jq >/dev/null 2>&1 || die "jq не найден. Установите: brew install jq"; }
+need_settings() {
+  [ -f "$SETTINGS" ] || die "settings.json не найден: $SETTINGS"
+  jq empty "$SETTINGS" >/dev/null 2>&1 || die "settings.json невалидный JSON: $SETTINGS"
+}
+
+# --- atomic JSON edit (fail-closed на cp, как bin/permission-mode после PR#10) ---
+atomic_jq_edit() {
+  local file="$1"; shift
+  local tmp; tmp="$(mktemp)"
+  if ! jq "$@" "$file" >"$tmp" 2>/dev/null; then
+    rm -f "$tmp"; echo "permissions-audit: ошибка jq над $file" >&2; return 1
+  fi
+  if ! jq empty "$tmp" >/dev/null 2>&1; then
+    rm -f "$tmp"; echo "permissions-audit: результат невалидный JSON — отбой, $file не тронут" >&2; return 1
+  fi
+  cp "$file" "$file.bak" || { rm -f "$tmp"; echo "permissions-audit: не удалось создать .bak — отбой, $file не тронут" >&2; return 1; }
+  mv "$tmp" "$file"      || { echo "permissions-audit: не удалось заменить $file (.bak создан)" >&2; return 1; }
+}
+
+# --- конфиг: DANGEROUS / SCOPED / DEPRECATED-regex -------------------------
+DANGEROUS=""
+SCOPED=""
+DEPRECATED_RE=""
+load_config() {
+  [ -f "$CONF" ] || die "конфиг не найден: $CONF"
+  local section=""
+  while IFS= read -r line; do
+    # strip comments + trim
+    line="${line%%#*}"
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    [ -z "$line" ] && continue
+    case "$line" in
+      ---*) section="${line#--- }"; section="${section%%:*}"; continue ;;
+    esac
+    case "$section" in
+      DANGEROUS) DANGEROUS="$DANGEROUS $line" ;;
+      SCOPED-ALTERNATIVES|SCOPED) SCOPED="$SCOPED
+$line" ;;
+      DEPRECATED-REGEX|DEPRECATED) DEPRECATED_RE="$DEPRECATED_RE
+$line" ;;
+    esac
+  done <"$CONF"
+}
+
+# --- классификация одного Bash(cmd) паттерна --------------------------------
+# print verdict: error / warn-danger / warn-deprecated / safe
+# $1 = полная entry строка, напр. "Bash(git:*)"
+classify() {
+  local entry="$1"
+  case "$entry" in
+    'Bash(*)'|'Bash(*:*)') echo "error: полный wildcard — разрешает ВСЁ: $entry"; return ;;
+    'Bash('*) ;;
+    *) return ;;  # не-Bash entry (Read/Edit/MCP) — не классифицируем как bash-проблема
+  esac
+  # извлечь cmd внутри Bash(...)
+  local cmd="${entry#Bash(}"; cmd="${cmd%)}"
+  # compound (shell-операторы) → deprecated
+  case "$cmd" in
+    *'&&'*|*'||'*|*';'*|*' |'*|*'$('*|*'`'*)
+      echo "warn-deprecated: compound команда (&&/||/;/|/\$()/backtick) — разбей или удали: $entry"; return ;;
+  esac
+  # deprecated-regex из конфига
+  local re
+  while IFS= read -r re; do
+    [ -z "$re" ] && continue
+    if [[ "$cmd" =~ $re ]]; then
+      echo "warn-deprecated: deprecated паттерн [$re]: $entry"; return
+    fi
+  done <<<"$DEPRECATED_RE"
+  # широкий wildcard <cmd>:* или <cmd> * → danger если cmd в списке
+  local base=""
+  case "$cmd" in
+    *':*') base="${cmd%%:*}"; base="${base%"${base##*[![:space:]]}"}" ;;
+    *' *') base="${cmd% *}"; base="${base%"${base##*[![:space:]]}"}" ;;
+  esac
+  if [ -n "$base" ]; then
+    # если base = пусто или * — уже обработано выше как error
+    for d in $DANGEROUS; do
+      if [ "$base" = "$d" ]; then
+        local alts=""; alts="$(printf '%s\n' "$SCOPED" | grep "^$d:" | head -1 | cut -d: -f2-)"
+        if [ -n "$alts" ]; then
+          # преобразовать " add diff status" → "git add, git diff, git status" (полные scoped-паттерны)
+          local full=""
+          local sub
+          for sub in $alts; do full="${full:+$full, }$d $sub"; done
+          echo "warn-danger: широкий $entry — Carte blanche на '$d'. Рассмотри scoped: $full"
+        else
+          echo "warn-danger: широкий $entry — Carte blanche на '$d'"
+        fi
+        return
+      fi
+    done
+    # safe wildcard (ls/grep/jq/...) — не флагаем
+    return
+  fi
+}
+
+# --- audit (read-only) ------------------------------------------------------
+PROBLEMS=0
+print_section() { printf '\n=== %s ===\n' "$1"; }
+
+cmd_audit() {
+  local rules i=0 entry verdict
+  # permissions.allow
+  local n_allow; n_allow=$(jq -r '.permissions.allow | length' "$SETTINGS" 2>/dev/null || echo 0)
+  if [ "$n_allow" -gt 0 ]; then
+    print_section "permissions.allow ($n_allow)"
+    while [ "$i" -lt "$n_allow" ]; do
+      entry=$(jq -r ".permissions.allow[$i]" "$SETTINGS")
+      verdict="$(classify "$entry")"
+      if [ -n "$verdict" ]; then
+        printf '  %s\n' "$verdict"; PROBLEMS=$((PROBLEMS+1))
+      fi
+      i=$((i+1))
+    done
+  fi
+  # permissions.ask (те же правила)
+  local n_ask; n_ask=$(jq -r '.permissions.ask | length' "$SETTINGS" 2>/dev/null || echo 0)
+  if [ "$n_ask" -gt 0 ]; then
+    print_section "permissions.ask ($n_ask)"
+    i=0
+    while [ "$i" -lt "$n_ask" ]; do
+      entry=$(jq -r ".permissions.ask[$i]" "$SETTINGS")
+      verdict="$(classify "$entry")"
+      if [ -n "$verdict" ]; then printf '  %s\n' "$verdict"; PROBLEMS=$((PROBLEMS+1)); fi
+      i=$((i+1))
+    done
+  fi
+  # env секреты
+  cmd_audit_env
+
+  echo
+  if [ "$PROBLEMS" -gt 0 ]; then
+    echo "Найдено проблем: $PROBLEMS (exit 1)"
+    return 1
+  fi
+  echo "Чисто — проблем не найдено (exit 0)"
+  return 0
+}
+
+cmd_audit_env() {
+  local n_env; n_env=$(jq -r '.env | length' "$SETTINGS" 2>/dev/null || echo 0)
+  [ "$n_env" -eq 0 ] && return
+  print_section "env (секреты)"
+  local keys; keys=$(jq -r '.env | keys[]' "$SETTINGS")
+  local k val
+  for k in $keys; do
+    case "$k" in
+      *[Tt][Oo][Kk][Ee][Nn]*|*[Kk][Ee][Yy]*|*[Ss][Ee][Cc][Rr][Ee][Tt]*|*[Pp][Aa][Ss][Sw][Oo][Rr][Dd]*|*[Pp][Aa][Ss][Ss]*|*[Cc][Rr][Ee][Dd][Ee][Nn][Tt][Ii][Aa][Ll]*|*API_KEY*)
+        val=$(jq -r --arg k "$k" '.env[$k]' "$SETTINGS")
+        # не-placeholder: длина > 12, не "<...>", не xxx/bool/path
+        case "$val" in
+          ''|*'<'*'>'*|xxx*|XXX*|true|false|*[![:print:]]*) continue ;;
+        esac
+        if [ "${#val}" -gt 12 ] && ! printf '%s' "$val" | grep -qE '^https?://|^/[a-z]|^[A-Za-z0-9_.-]{1,12}$'; then
+          printf '  warn-secret: env.%s — похоже на секрет. Значение НЕ печатаю. Вынеси в keychain/файл вне git.\n' "$k"
+          PROBLEMS=$((PROBLEMS+1))
+        fi
+        ;;
+    esac
+  done
+}
+
+# --- cleanup (atomic, .bak) -------------------------------------------------
+# удалить ТОЛЬКО deprecated/compound, дедуп.
+# ВАЖНО: широкие валидные паттерны (warn-danger/error: Bash(git:*), Bash(*)) НЕ трогать —
+# это рабочие правила, cleanup не генерирует scoped-замены (это работа audit/человека).
+# Иначе пользователь потеряет allow-правило → сломанная CC-сессия. (Codex review PR#11)
+cmd_cleanup() {
+  local tmp_allow; tmp_allow="$(mktemp)"
+  local n i=0 entry verdict
+  n=$(jq -r '.permissions.allow | length' "$SETTINGS" 2>/dev/null || echo 0)
+  while [ "$i" -lt "$n" ]; do
+    entry=$(jq -r ".permissions.allow[$i]" "$SETTINGS")
+    verdict="$(classify "$entry")"
+    # оставить если: clean (нет verdict) ИЛИ широкое правило (warn-danger/error) — НЕ deprecated.
+    case "$verdict" in
+      ''|warn-danger:*|error:*)
+        printf '%s\n' "$entry" >>"$tmp_allow" ;;
+      warn-deprecated:*)
+        : ;;   # удаляем только deprecated/compound (финальный счётчик ниже)
+    esac
+    i=$((i+1))
+  done
+  local tmp_dedup; tmp_dedup="$(mktemp)"
+  awk '!seen[$0]++' "$tmp_allow" >"$tmp_dedup"
+  local new_allow_json; new_allow_json=$(jq -R -s 'split("\n") | map(select(length>0))' "$tmp_dedup")
+  rm -f "$tmp_allow" "$tmp_dedup"
+  # atomic-запись: заменить .permissions.allow
+  atomic_jq_edit "$SETTINGS" --argjson arr "$new_allow_json" '.permissions.allow = $arr' \
+    || die "не удалось записать очищенный allow"
+  local removed; removed=$((n - $(printf '%s' "$new_allow_json" | jq 'length')))
+  echo "✓ cleanup: allow $n → $(printf '%s' "$new_allow_json" | jq 'length') записей (удалено $removed)"
+  echo "  бэкап: $SETTINGS.bak"
+}
+
+usage() {
+  cat <<EOF
+permissions-audit — аудит и чистка permissions.allow в ~/.claude/settings.json.
+См. claude-tools#6.
+
+  permissions-audit [audit]     аудит (read-only): широкие паттерны + deprecated + секреты (default)
+  permissions-audit --check     алиас audit
+  permissions-audit cleanup     удалить deprecated/compound, дедуп (atomic, .bak)
+  permissions-audit --help|-h   эта справка
+
+НЕ делает merge (сворачивание дубли в wildcard) — это permissions-optimizer.
+НЕ печатает значения секретов (только имена ключей).
+
+Settings:  $SETTINGS  (переопределить через CLAUDE_SETTINGS)
+Config:    $CONF      (переопределить через PERMISSIONS_AUDIT_CONF)
+EOF
+}
+
+# --- dispatch ---------------------------------------------------------------
+need_jq; need_settings; load_config
+
+case "${1:-audit}" in
+  audit|--check|"") cmd_audit ;;
+  cleanup) cmd_cleanup ;;
+  --help|-h) usage ;;
+  *) echo "permissions-audit: неизвестная команда: $1" >&2; usage; exit 2 ;;
+esac

@@ -66,6 +66,7 @@ done
 ```bash
 bash tests/test_timeout_fix.sh                  # red-green тесты bin/timeout-fix (на моках)
 bash tests/test_permission_mode.sh              # red-green тесты bin/permission-mode (на tmp-копии settings.json)
+bash tests/test_permissions_audit.sh            # red-green тесты bin/permissions-audit (audit/cleanup, tmp-копия settings.json)
 bash tests/test_one_command_at_a_time.sh        # red-green тесты хука compound-команд (через jq-pipe)
 ```
 
