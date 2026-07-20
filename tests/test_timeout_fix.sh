@@ -238,31 +238,32 @@ t8_run_idempotent() {
   teardown
 }
 
-# 9. run без brew в PATH → фейлит с понятным сообщением (exit ≠ 0), без трейса.
+# 9. run без brew в PATH → фейлит с понятным сообщением (exit 1 от die(), не 127 от absent binary).
 t9_run_no_brew() {
   setup
-  # brew не замокан; PATH = только fakebin (jq берём из PATH-fallback ниже).
-  # Чтобы jq был доступен, но brew — нет: кладём symlink jq в fakebin, brew не кладём.
-  local real_jq; real_jq="$(command -v jq)"
-  ln -sf "$real_jq" "$FAKEBIN/jq"
+  # PATH = только fakebin: кладём туда bash+jq (чтобы скрипт дошёл до ensure_coreutils),
+  # но НЕ brew → ensure_coreutils должен умереть через die("brew не найден").
+  ln -sf "$(command -v bash)" "$FAKEBIN/bash"
+  ln -sf "$(command -v jq)"   "$FAKEBIN/jq"
   seed_env_timeout "$DESIRED"
   seed_gnubin_in_zshrc
   PATH="$FAKEBIN" run_fix >/dev/null 2>&1
   local code=$?
-  if [ "$code" != "0" ]; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); FAILED_TESTS+=("t9: run без brew должен фейлить, exit=$code"); fi
+  if [ "$code" = "1" ]; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); FAILED_TESTS+=("t9: run без brew должен die exit=1, получили exit=$code"); fi
   teardown
 }
 
-# 10. run без jq → фейлит с подсказкой.
+# 10. run без jq → фейлит die("jq не найден"), exit 1.
 t10_run_no_jq() {
   setup
   make_brew 1; make_gtimeout
   seed_env_timeout "$DESIRED"
   seed_gnubin_in_zshrc
-  # PATH без директорий с jq — эмуляция отсутствия jq.
+  # PATH = только fakebin с bash, но БЕЗ jq → need_jq должен умереть.
+  ln -sf "$(command -v bash)" "$FAKEBIN/bash"
   PATH="$FAKEBIN" run_fix >/dev/null 2>&1
   local code=$?
-  if [ "$code" != "0" ]; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); FAILED_TESTS+=("t10: run без jq должен фейлить, exit=$code"); fi
+  if [ "$code" = "1" ]; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); FAILED_TESTS+=("t10: run без jq должен die exit=1, получили exit=$code"); fi
   teardown
 }
 
@@ -287,12 +288,23 @@ t12_custom_value() {
   teardown
 }
 
+# 13. --value отклоняет не-число (M4: валидация формата).
+t13_value_rejects_nonnumeric() {
+  setup
+  ln -sf "$(command -v bash)" "$FAKEBIN/bash"
+  ln -sf "$(command -v jq)"   "$FAKEBIN/jq"
+  PATH="$FAKEBIN" run_fix --value abc >/dev/null 2>&1
+  local code=$?
+  if [ "$code" = "1" ]; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); FAILED_TESTS+=("t13: --value abc должен отклоняться exit=1, получили exit=$code"); fi
+  teardown
+}
+
 # --- раннер ----------------------------------------------------------------
 run_all() {
   for t in t1_all_ok_check t2_no_coreutils_check t3_no_env_check t4_low_env_check \
            t5_no_gnubin_check t6_run_no_brew_reinstall t7_run_sets_env \
            t8_run_idempotent t9_run_no_brew t10_run_no_jq t11_zshrc_no_dup \
-           t12_custom_value; do
+           t12_custom_value t13_value_rejects_nonnumeric; do
     "$t"
   done
 }
