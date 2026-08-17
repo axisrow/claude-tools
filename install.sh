@@ -47,6 +47,14 @@ esac
 # живая связь с skills/ полезнее копии — правка скилла видна сразу, без переустановки.
 SKILLS_DIR="$HOME/.claude/skills"
 mkdir -p "$SKILLS_DIR"
+# Не удаляем пользовательский каталог с таким именем: установка должна быть
+# обратимой и не терять чужой skill при последующей ошибке. Симлинк можно
+# безопасно заменить на управляемый репозиторием.
+TEST_CATEGORIES_TARGET="$SKILLS_DIR/test-categories"
+if [ -e "$TEST_CATEGORIES_TARGET" ] && [ ! -L "$TEST_CATEGORIES_TARGET" ]; then
+  echo "✗ $TEST_CATEGORIES_TARGET уже существует как каталог/файл; удалите или перенесите его вручную" >&2
+  exit 1
+fi
 for skill in fix hooks test-categories; do
   TARGET="$SKILLS_DIR/$skill"
   # Убираем что угодно на этом месте: устаревший symlink или старую копию-каталог.
