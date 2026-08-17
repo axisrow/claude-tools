@@ -47,7 +47,7 @@ esac
 # живая связь с skills/ полезнее копии — правка скилла видна сразу, без переустановки.
 SKILLS_DIR="$HOME/.claude/skills"
 mkdir -p "$SKILLS_DIR"
-for skill in fix hooks; do
+for skill in fix hooks test-categories; do
   TARGET="$SKILLS_DIR/$skill"
   # Убираем что угодно на этом месте: устаревший symlink или старую копию-каталог.
   if [ -L "$TARGET" ] || [ -e "$TARGET" ]; then
