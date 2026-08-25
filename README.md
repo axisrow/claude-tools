@@ -18,6 +18,8 @@ CLAUDE.md не лечат — агент их игнорирует. Лечит *
   Безопасная atomic-правка `settings.json`. См. ниже.
 - **`bin/permissions-audit`** — аудит + чистка `permissions.allow`: детектит слишком широкие
   паттерны (`Bash(git:*)`/`Bash(*)`) и секреты в `env`, чистит deprecated/compound мусор. См. ниже.
+- **`bin/merge-guard`** — массовое включение/отключение branch protection (require reviews) на
+  всех личных GitHub-репо. Запрет мерджа без ревью на стороне GitHub. См. ниже.
 - **`registry.json`** — источник правды для своих хуков.
 - **`skills/hooks/`** — slash-скилл `/hooks` (обёртка над hookctl).
 - **`skills/fix/`** — slash-скилл `/fix` (багфикс по строгому TDD).
@@ -31,7 +33,7 @@ cd /path/to/claude-tools   # куда клонирован репо
 bash install.sh
 ```
 
-`install.sh` проверит `jq`, сделает `chmod +x`, symlink `~/bin/hookctl`, симлинкнет
+`install.sh` проверит `jq`, сделает `chmod +x`, symlink `~/bin/hookctl` и `~/bin/merge-guard`, симлинкнет
 скиллы `/fix`, `/hooks` и `/test-categories` в `~/.claude/skills/`, включит `git-branch-guard`. Боевой
 `~/.claude/settings.json` правится только через `hookctl` (с бэкапом `.bak`); чужие хуки
 (`SessionStart` context-heal и др.) сохраняются.
@@ -144,6 +146,25 @@ bin/permissions-audit cleanup    # удалить deprecated/compound + деду
 Тесты: `bash tests/test_permissions_audit.sh` (22 кейса: audit/cleanup, изоляция через `CLAUDE_SETTINGS`).
 
 
+## bin/merge-guard — защита от мержа PR без ревью
+
+Claude Code агент может смержить PR через `gh pr merge` без человеческого ревью, если
+репозиторий не имеет branch protection. `git-branch-guard.sh` перехватывает опасные
+git-операции локально, но `gh pr merge` не попадает под его паттерны. Единственный надёжный
+способ запретить мердж без ревью — **branch protection на стороне GitHub**. См.
+[axisrow/claude-tools#12](https://github.com/axisrow/claude-tools/issues/12).
+
+```bash
+merge-guard enable  [REPO]   # включить required_pull_request_reviews
+merge-guard disable [REPO]   # отключить reviews (не трогает остальные rules)
+merge-guard status  [REPO]   # показать статус (read-only)
+```
+
+Действует на default-ветку (обычно main/master). Без аргумента REPO — все личные репо
+(owner, без forks/archived). Idempotent: повторный `enable`/`disable` безопасен. Существующие
+branch protection rules (required_status_checks, restrictions) **сохраняются** — используется
+PATCH при наличии защиты, не PUT.
+
 ## bin/timeout-fix — фикс бага `timeout` на macOS
 
 Claude Code на macOS упорно обёртывает команды в `timeout N`/`gtimeout N`, которых нет
@@ -247,6 +268,7 @@ claude-tools/
 ├── registry.json
 ├── bin/
 │   ├── hookctl              # управление хуками
+│   ├── merge-guard          # защита от мержа PR без ревью (branch protection)
 │   ├── permission-mode      # отключение auto-классификатора
 │   ├── permissions-audit    # аудит + чистка permissions.allow
 │   └── timeout-fix          # фикс бага timeout на macOS

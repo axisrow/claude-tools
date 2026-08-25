@@ -1,0 +1,414 @@
+#!/usr/bin/env bash
+# merge-guard — управление branch protection на GitHub:
+# массовое включение/отключение требования review перед мержом PR
+# на всех личных репозиториях (owner, не fork).
+#
+# Решает: Claude Code агент может смержить PR без ревью через `gh pr merge`,
+# если репозиторий не имеет branch protection. Этот скрипт включает
+# required_pull_request_reviews на дефолтной ветке всех личных репо.
+# git-branch-guard.sh перехватывает delete/force-push/close, но не merge.
+#
+# См. claude-tools#12.
+set -uo pipefail
+
+# --- зависимости --------------------------------------------------------------
+die() { echo "merge-guard: $*" >&2; exit 1; }
+need_jq() { command -v jq >/dev/null 2>&1 || die "jq не найден. Установите: brew install jq"; }
+need_gh() {
+  command -v gh >/dev/null 2>&1 || die "gh не найден. Установите: brew install gh"
+}
+check_gh_auth() {
+  gh auth status >/dev/null 2>&1 || die "gh не аутентифицирован. Запустите: gh auth login"
+}
+
+need_jq
+need_gh
+
+# --- конфигурация -------------------------------------------------------------
+# Sleep между write-операциями к GitHub API (rate limit: 5000 req/hour).
+SLEEP="${MERGE_GUARD_SLEEP:-1}"
+
+# --- GitHub API функции -------------------------------------------------------
+
+# Список личных репо (non-fork, non-archived, owner). По одному на строку.
+list_repos() {
+  gh api --paginate -X GET user/repos \
+    -f per_page=100 -f type=owner \
+    --jq '.[] | select(.fork == false and .archived == false) | .full_name' \
+    2>/dev/null || die "не удалось получить список репо"
+}
+
+# Имя дефолтной ветки репозитория.
+get_default_branch() {
+  local repo="$1"
+  gh api "repos/$repo" --jq '.default_branch' 2>/dev/null
+}
+
+# Проверяет, включён ли required_pull_request_reviews на ветке.
+# GitHub API не возвращает поле "enabled" в этом эндпоинте — успешный GET
+# (HTTP 200) сам по себе значит "включено", 404 значит "выключено". Любая
+# другая ошибка (403/5xx/rate-limit/сеть) — не должна маскироваться под
+# "выключено", иначе enable_repo примет её за отсутствие защиты и снесёт
+# существующие правила деструктивным PUT (см. check_protection_exists).
+# Выводит "true" (200) / "false" (404) / "" (иная ошибка — вызывающий код
+# обязан прервать операцию, а не трактовать пустой вывод как "false").
+check_reviews_enabled() {
+  local repo="$1" branch="$2"
+  local http_status
+  http_status="$(gh api -i --silent "repos/$repo/branches/$branch/protection/required_pull_request_reviews" \
+    2>/dev/null | awk 'NR==1{print $2; exit}')"
+  case "$http_status" in
+    200) echo "true" ;;
+    404) echo "false" ;;
+    *) echo "" ;;
+  esac
+}
+
+# Проверяет, существует ли branch protection на ветке.
+# Return 0 = существует (200), 1 = точно нет (404), 2 = неизвестно (иная
+# ошибка — 403/5xx/rate-limit/сеть). Только 404 разрешает enable_repo
+# перейти на деструктивный PUT; любая другая ошибка должна прервать операцию
+# fail-closed, а не молча трактоваться как "защиты нет".
+check_protection_exists() {
+  local repo="$1" branch="$2"
+  local http_status
+  http_status="$(gh api -i --silent "repos/$repo/branches/$branch/protection" \
+    2>/dev/null | awk 'NR==1{print $2; exit}')"
+  case "$http_status" in
+    200) return 0 ;;
+    404) return 1 ;;
+    *) return 2 ;;
+  esac
+}
+
+# Проверяет, включён ли enforce_admins на ветке.
+# ВАЖНО: в отличие от required_pull_request_reviews, этот sub-endpoint
+# возвращает HTTP 200 с телом {"enabled": true|false} и при true, и при
+# false (404 бывает только когда protection на ветке нет вообще) —
+# поэтому здесь, в отличие от check_reviews_enabled/check_protection_exists,
+# статус-код НЕ несёт нужной информации и нужно читать поле .enabled из тела.
+# Выводит "true" / "false" / "" (ошибка API — вызывающий код обязан
+# прервать операцию, не трактовать пустой вывод как "false").
+check_enforce_admins_enabled() {
+  local repo="$1" branch="$2"
+  gh api "repos/$repo/branches/$branch/protection/enforce_admins" \
+    --jq '.enabled' 2>/dev/null || true
+}
+
+# --- операции -----------------------------------------------------------------
+
+# Включить required_pull_request_reviews на одной ветке.
+# Безопасно: если защита уже есть — PATCH (сохраняет остальные правила),
+# если нет — PUT (создаёт с null для остальных полей).
+enable_repo() {
+  local repo="$1" branch="$2"
+
+  # Idempotency: уже включена? "" значит "не удалось определить" (ошибка
+  # API, не 404) — fail-closed, не продолжаем операцию вслепую.
+  local existing
+  existing="$(check_reviews_enabled "$repo" "$branch")"
+  if [ -z "$existing" ]; then
+    printf '  ✗ %-50s %s — ОШИБКА: не удалось определить состояние reviews (API error)\n' "$repo" "$branch"
+    return 1
+  fi
+  if [ "$existing" = "true" ]; then
+    # reviews уже включены — но это НЕ значит, что enforce_admins тоже
+    # включён: репо мог быть защищён старой версией этого скрипта (когда
+    # enforce_admins:false), или предыдущий запуск успешно сделал PATCH
+    # reviews, но POST enforce_admins упал. Настоящий idempotent skip —
+    # только когда ОБА условия выполнены; иначе дожимаем enforce_admins.
+    local admins_enabled
+    admins_enabled="$(check_enforce_admins_enabled "$repo" "$branch")"
+    if [ -z "$admins_enabled" ]; then
+      printf '  ✗ %-50s %s — ОШИБКА: не удалось определить состояние enforce_admins (API error)\n' "$repo" "$branch"
+      return 1
+    fi
+    if [ "$admins_enabled" = "true" ]; then
+      printf '  ✓ %-50s %s — уже включена (idempotent skip)\n' "$repo" "$branch"
+      return 0
+    fi
+    printf '  POST %-50s %s — reviews уже включены, но admin enforcement выключен — дожимаю …\n' "$repo" "$branch"
+    if gh api -X POST \
+        "repos/$repo/branches/$branch/protection/enforce_admins" \
+        >/dev/null 2>&1; then
+      printf '  ✓ %-50s %s — admin enforcement включён\n' "$repo" "$branch"
+      sleep "$SLEEP"
+    else
+      printf '  ✗ %-50s %s — ОШИБКА: не удалось включить enforce_admins\n' "$repo" "$branch"
+      return 1
+    fi
+    return 0
+  fi
+
+  check_protection_exists "$repo" "$branch"
+  local protection_status=$?
+  if [ "$protection_status" -eq 2 ]; then
+    printf '  ✗ %-50s %s — ОШИБКА: не удалось проверить наличие protection (API error) — пропускаю, не трогаю\n' "$repo" "$branch"
+    return 1
+  elif [ "$protection_status" -eq 0 ]; then
+    # Защита существует — PATCH: добавляем reviews, не трогаем остальное.
+    # enforce_admins трогаем отдельным PATCH на свой sub-endpoint — эта
+    # ветка не должна оставлять его в текущем (возможно false) состоянии,
+    # иначе владелец репо (обычно admin) сможет обойти защиту.
+    printf '  PATCH %-50s %s — добавляю reviews к существующей защите …\n' "$repo" "$branch"
+    if gh api -X PATCH \
+        "repos/$repo/branches/$branch/protection/required_pull_request_reviews" \
+        -F dismiss_stale_reviews=true \
+        -F require_code_owner_reviews=false \
+        -F required_approving_review_count=1 \
+        -F require_last_push_approval=false \
+        >/dev/null 2>&1 \
+      && gh api -X POST \
+        "repos/$repo/branches/$branch/protection/enforce_admins" \
+        >/dev/null 2>&1; then
+      printf '  ✓ %-50s %s — защита включена (требуется 1 approval, admin enforcement on)\n' "$repo" "$branch"
+    else
+      printf '  ✗ %-50s %s — ОШИБКА PATCH\n' "$repo" "$branch"
+      return 1
+    fi
+  else
+    # Защиты точно нет (404) — PUT: создаём с null для остальных полей.
+    # enforce_admins: true — иначе владелец репо (обычно admin) может
+    # смержить/запушить в обход только что созданной защиты.
+    printf '  PUT %-50s %s — создаю защиту …\n' "$repo" "$branch"
+    if printf '%s\n' '{
+  "required_status_checks": null,
+  "enforce_admins": true,
+  "required_pull_request_reviews": {
+    "dismiss_stale_reviews": true,
+    "require_code_owner_reviews": false,
+    "required_approving_review_count": 1,
+    "require_last_push_approval": false
+  },
+  "restrictions": null,
+  "allow_force_pushes": false,
+  "allow_deletions": false,
+  "required_linear_history": false
+}' | gh api -X PUT "repos/$repo/branches/$branch/protection" --input - \
+        >/dev/null 2>&1; then
+      printf '  ✓ %-50s %s — защита включена (требуется 1 approval, admin enforcement on)\n' "$repo" "$branch"
+    else
+      printf '  ✗ %-50s %s — ОШИБКА PUT\n' "$repo" "$branch"
+      return 1
+    fi
+  fi
+
+  sleep "$SLEEP"
+}
+
+# Снять required_pull_request_reviews на одной ветке.
+# DELETE sub-endpoint — не трогает остальные protection rules.
+disable_repo() {
+  local repo="$1" branch="$2"
+
+  # Idempotency: уже снята? "" значит ошибку API — не трактуем как "снята".
+  local existing
+  existing="$(check_reviews_enabled "$repo" "$branch")"
+  if [ -z "$existing" ]; then
+    printf '  ✗ %-50s %s — ОШИБКА: не удалось определить состояние reviews (API error)\n' "$repo" "$branch"
+    return 1
+  fi
+  if [ "$existing" != "true" ]; then
+    printf '  ○ %-50s %s — reviews не включены (idempotent skip)\n' "$repo" "$branch"
+    return 0
+  fi
+
+  printf '  DELETE %-50s %s — снимаю reviews …\n' "$repo" "$branch"
+  if gh api -X DELETE \
+      "repos/$repo/branches/$branch/protection/required_pull_request_reviews" \
+      >/dev/null 2>&1; then
+    printf '  ✓ %-50s %s — reviews снят\n' "$repo" "$branch"
+  else
+    printf '  ✗ %-50s %s — ОШИБКА DELETE\n' "$repo" "$branch"
+    return 1
+  fi
+
+  sleep "$SLEEP"
+}
+
+# Показать статус защиты одного репо.
+status_repo() {
+  local repo="$1" branch="$2"
+
+  local reviews
+  reviews="$(check_reviews_enabled "$repo" "$branch")"
+
+  if [ -z "$reviews" ]; then
+    printf '  ⚠ %-50s %s — не удалось определить статус (API error)\n' "$repo" "$branch"
+    return
+  fi
+
+  if [ "$reviews" = "true" ]; then
+    printf '  ✓ %-50s %s — reviews обязателен\n' "$repo" "$branch"
+    return
+  fi
+
+  check_protection_exists "$repo" "$branch"
+  case $? in
+    0) printf '  ○ %-50s %s — защита есть, но reviews не включён\n' "$repo" "$branch" ;;
+    1) printf '  ✗ %-50s %s — защита отсутствует\n' "$repo" "$branch" ;;
+    *) printf '  ⚠ %-50s %s — не удалось определить статус (API error)\n' "$repo" "$branch" ;;
+  esac
+}
+
+# --- команды (итерация по репо или конкретный репо) ---------------------------
+
+cmd_enable() {
+  local target="${1:-}"
+  check_gh_auth
+
+  if [ -n "$target" ]; then
+    # Один конкретный репо.
+    local branch
+    branch="$(get_default_branch "$target")" || die "не удалось получить default_branch для $target"
+    [ -z "$branch" ] && die "у $target нет default branch (пустое репо?)"
+    enable_repo "$target" "$branch"
+    return
+  fi
+
+  # Все личные репо.
+  local repos
+  repos="$(list_repos)"
+  [ -z "$repos" ] && { echo "Нет личных репо (без forks/archived)"; return 0; }
+
+  local count
+  count="$(echo "$repos" | wc -l | tr -d ' ')"
+  echo "Найдено $count личных репо (без forks/archived)"
+  echo
+
+  local err=0 ok=0 skipped=0 repo branch
+  while IFS= read -r repo; do
+    [ -z "$repo" ] && continue
+    branch="$(get_default_branch "$repo" 2>/dev/null)" || {
+      printf '  ⚠ %-50s — пропущен (нет default branch)\n' "$repo"
+      skipped=$((skipped+1))
+      continue
+    }
+    [ -z "$branch" ] && {
+      printf '  ⚠ %-50s — пропущен (нет default branch)\n' "$repo"
+      skipped=$((skipped+1))
+      continue
+    }
+    if enable_repo "$repo" "$branch"; then
+      ok=$((ok+1))
+    else
+      err=$((err+1))
+    fi
+  done <<< "$repos"
+
+  echo
+  echo "Итого: $ok включено, $skipped пропущено, $err ошибок"
+  [ "$err" -gt 0 ] && return 1
+}
+
+cmd_disable() {
+  local target="${1:-}"
+  check_gh_auth
+
+  if [ -n "$target" ]; then
+    local branch
+    branch="$(get_default_branch "$target")" || die "не удалось получить default_branch для $target"
+    [ -z "$branch" ] && die "у $target нет default branch (пустое репо?)"
+    disable_repo "$target" "$branch"
+    return
+  fi
+
+  local repos
+  repos="$(list_repos)"
+  [ -z "$repos" ] && { echo "Нет личных репо (без forks/archived)"; return 0; }
+
+  local count
+  count="$(echo "$repos" | wc -l | tr -d ' ')"
+  echo "Найдено $count личных репо (без forks/archived)"
+  echo
+
+  local err=0 ok=0 skipped=0 repo branch
+  while IFS= read -r repo; do
+    [ -z "$repo" ] && continue
+    branch="$(get_default_branch "$repo" 2>/dev/null)" || {
+      printf '  ⚠ %-50s — пропущен (нет default branch)\n' "$repo"
+      skipped=$((skipped+1))
+      continue
+    }
+    [ -z "$branch" ] && {
+      printf '  ⚠ %-50s — пропущен (нет default branch)\n' "$repo"
+      skipped=$((skipped+1))
+      continue
+    }
+    if disable_repo "$repo" "$branch"; then
+      ok=$((ok+1))
+    else
+      err=$((err+1))
+    fi
+  done <<< "$repos"
+
+  echo
+  echo "Итого: $ok снято, $skipped пропущено, $err ошибок"
+  [ "$err" -gt 0 ] && return 1
+}
+
+cmd_status() {
+  local target="${1:-}"
+  check_gh_auth
+
+  if [ -n "$target" ]; then
+    local branch
+    branch="$(get_default_branch "$target")" || die "не удалось получить default_branch для $target"
+    [ -z "$branch" ] && die "у $target нет default branch (пустое репо?)"
+    status_repo "$target" "$branch"
+    return
+  fi
+
+  local repos
+  repos="$(list_repos)"
+  [ -z "$repos" ] && { echo "Нет личных репо (без forks/archived)"; return 0; }
+
+  local count
+  count="$(echo "$repos" | wc -l | tr -d ' ')"
+  echo "Статус branch protection ($count личных репо, без forks/archived)"
+  echo
+
+  local repo branch
+  while IFS= read -r repo; do
+    [ -z "$repo" ] && continue
+    branch="$(get_default_branch "$repo" 2>/dev/null)" || {
+      printf '  ⚠ %-50s — пропущен (нет default branch)\n' "$repo"
+      continue
+    }
+    [ -z "$branch" ] && {
+      printf '  ⚠ %-50s — пропущен (нет default branch)\n' "$repo"
+      continue
+    }
+    status_repo "$repo" "$branch"
+  done <<< "$repos"
+}
+
+# --- справка ------------------------------------------------------------------
+usage() {
+  cat <<EOF
+merge-guard — управление branch protection на GitHub:
+включение/отключение требования review перед мержом PR
+на всех личных репозиториях. См. claude-tools#12.
+
+  merge-guard enable  [REPO]   включить required_pull_request_reviews
+  merge-guard disable [REPO]   отключить reviews (не трогает остальные rules)
+  merge-guard status  [REPO]   показать статус (read-only)
+  merge-guard --help  | -h     эта справка
+
+REPO — конкретное репо (owner/repo). Без аргумента — все личные репо.
+Forks и archived-репо пропускаются. Idempotent: повторный enable/disable безопасен.
+Существующие branch protection rules (status checks, restrictions) сохраняются —
+используется PATCH при наличии защиты, не PUT.
+
+Sleep между write-операциями: ${SLEEP}s (переопределить через MERGE_GUARD_SLEEP).
+EOF
+}
+
+# --- dispatch -----------------------------------------------------------------
+case "${1:-}" in
+  enable)  shift; cmd_enable "$@" ;;
+  disable) shift; cmd_disable "$@" ;;
+  status)  shift; cmd_status "$@" ;;
+  --help|-h|"") usage ;;
+  *) echo "merge-guard: неизвестная команда: $1" >&2; echo; usage; exit 1 ;;
+esac

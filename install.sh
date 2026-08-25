@@ -24,8 +24,9 @@ echo "✓ jq: $(jq --version)"
 
 # --- 2. права на исполнение -------------------------------------------------
 chmod +x "$SCRIPT_DIR/bin/hookctl"
+chmod +x "$SCRIPT_DIR/bin/merge-guard"
 chmod +x "$SCRIPT_DIR/hooks/git-branch-guard.sh"
-echo "✓ chmod +x bin/hookctl hooks/git-branch-guard.sh"
+echo "✓ chmod +x bin/hookctl bin/merge-guard hooks/git-branch-guard.sh"
 
 # --- 3. symlink в ~/bin -----------------------------------------------------
 INSTALL_DIR="$HOME/bin"
@@ -36,6 +37,13 @@ if [ -L "$LINK" ] || [ -e "$LINK" ]; then
 fi
 ln -s "$SCRIPT_DIR/bin/hookctl" "$LINK"
 echo "✓ symlink: $LINK -> $SCRIPT_DIR/bin/hookctl"
+
+LINK="$INSTALL_DIR/merge-guard"
+if [ -L "$LINK" ] || [ -e "$LINK" ]; then
+  rm -f "$LINK"
+fi
+ln -s "$SCRIPT_DIR/bin/merge-guard" "$LINK"
+echo "✓ symlink: $LINK -> $SCRIPT_DIR/bin/merge-guard"
 
 case ":$PATH:" in
   *":$INSTALL_DIR:"*) ;;
