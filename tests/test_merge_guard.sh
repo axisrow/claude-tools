@@ -143,7 +143,17 @@ case "$ENDPOINT" in
     esac
     ;;
   repos/*/branches/*/protection/enforce_admins)
-    exit "${GH_MOCK_WRITE_EXIT:-0}"
+    case "$METHOD" in
+      GET)
+        code="${GH_MOCK_ENFORCE_ADMINS_STATUS:-200}"
+        [ "$INCLUDE" = "1" ] && status_line "$code"
+        [ "$code" = "200" ] && exit 0 || exit 1
+        ;;
+      POST)
+        exit "${GH_MOCK_WRITE_EXIT:-0}"
+        ;;
+      *) echo "gh-mock: unexpected method $METHOD for enforce_admins sub-endpoint" >&2; exit 2 ;;
+    esac
     ;;
   repos/*/branches/*/protection)
     case "$METHOD" in
@@ -283,12 +293,35 @@ t11_status_reviews_enabled() {
   teardown
 }
 
+# 12. Idempotent-skip НЕ должен пропускать enforce_admins: если reviews уже
+#     включены (200), но enforce_admins ещё false (репо защищён старой версией
+#     скрипта или предыдущий POST упал) — enable_repo обязан дожать enforce_admins,
+#     а не молча вернуть "уже включена".
+t12_idempotent_skip_still_fixes_enforce_admins() {
+  setup; make_gh
+  GH_MOCK_REVIEWS_STATUS=200 GH_MOCK_ENFORCE_ADMINS_STATUS=404 \
+    run_mg enable owner/repo-a >/dev/null 2>&1
+  assert_match "enforce_admins" "$GH_LOG" "t12: reviews=200 но enforce_admins=404 → всё равно дёргает enforce_admins POST"
+  teardown
+}
+
+# 13. Настоящий idempotent-skip: reviews=200 И enforce_admins уже true —
+#     тогда действительно ничего не долается (нет лишних write-вызовов).
+t13_true_idempotent_skip_when_both_enabled() {
+  setup; make_gh
+  local out
+  out="$(GH_MOCK_REVIEWS_STATUS=200 GH_MOCK_ENFORCE_ADMINS_STATUS=200 run_mg enable owner/repo-a 2>&1)"
+  assert_match "уже включена" <(echo "$out") "t13: reviews=200 и enforce_admins=200 → настоящий idempotent skip"
+  teardown
+}
+
 # --- раннер -----------------------------------------------------------------
 run_all() {
   for t in t1_list_repos_uses_get t2_reviews_enabled_on_200 t3_reviews_disabled_on_404_not_403 \
            t4_reviews_403_fails_closed t5_protection_403_no_destructive_put t6_protection_404_goes_to_put \
            t7_put_payload_enforce_admins_true t8_patch_branch_calls_enforce_admins \
-           t9_disable_403_fails_closed t10_status_403_shows_error_not_absent t11_status_reviews_enabled; do
+           t9_disable_403_fails_closed t10_status_403_shows_error_not_absent t11_status_reviews_enabled \
+           t12_idempotent_skip_still_fixes_enforce_admins t13_true_idempotent_skip_when_both_enabled; do
     "$t"
   done
 }

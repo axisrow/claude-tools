@@ -81,6 +81,21 @@ check_protection_exists() {
   esac
 }
 
+# Проверяет, включён ли enforce_admins на ветке (тот же HTTP-статус паттерн,
+# что и check_reviews_enabled). Выводит "true" (200) / "false" (404) / "" (иная
+# ошибка — вызывающий код обязан прервать операцию, не трактовать как false).
+check_enforce_admins_enabled() {
+  local repo="$1" branch="$2"
+  local http_status
+  http_status="$(gh api -i --silent "repos/$repo/branches/$branch/protection/enforce_admins" \
+    2>/dev/null | awk 'NR==1{print $2; exit}')"
+  case "$http_status" in
+    200) echo "true" ;;
+    404) echo "false" ;;
+    *) echo "" ;;
+  esac
+}
+
 # --- операции -----------------------------------------------------------------
 
 # Включить required_pull_request_reviews на одной ветке.
@@ -93,12 +108,37 @@ enable_repo() {
   # API, не 404) — fail-closed, не продолжаем операцию вслепую.
   local existing
   existing="$(check_reviews_enabled "$repo" "$branch")"
-  if [ "$existing" = "true" ]; then
-    printf '  ✓ %-50s %s — уже включена (idempotent skip)\n' "$repo" "$branch"
-    return 0
-  elif [ -z "$existing" ]; then
+  if [ -z "$existing" ]; then
     printf '  ✗ %-50s %s — ОШИБКА: не удалось определить состояние reviews (API error)\n' "$repo" "$branch"
     return 1
+  fi
+  if [ "$existing" = "true" ]; then
+    # reviews уже включены — но это НЕ значит, что enforce_admins тоже
+    # включён: репо мог быть защищён старой версией этого скрипта (когда
+    # enforce_admins:false), или предыдущий запуск успешно сделал PATCH
+    # reviews, но POST enforce_admins упал. Настоящий idempotent skip —
+    # только когда ОБА условия выполнены; иначе дожимаем enforce_admins.
+    local admins_enabled
+    admins_enabled="$(check_enforce_admins_enabled "$repo" "$branch")"
+    if [ -z "$admins_enabled" ]; then
+      printf '  ✗ %-50s %s — ОШИБКА: не удалось определить состояние enforce_admins (API error)\n' "$repo" "$branch"
+      return 1
+    fi
+    if [ "$admins_enabled" = "true" ]; then
+      printf '  ✓ %-50s %s — уже включена (idempotent skip)\n' "$repo" "$branch"
+      return 0
+    fi
+    printf '  POST %-50s %s — reviews уже включены, но admin enforcement выключен — дожимаю …\n' "$repo" "$branch"
+    if gh api -X POST \
+        "repos/$repo/branches/$branch/protection/enforce_admins" \
+        >/dev/null 2>&1; then
+      printf '  ✓ %-50s %s — admin enforcement включён\n' "$repo" "$branch"
+      sleep "$SLEEP"
+    else
+      printf '  ✗ %-50s %s — ОШИБКА: не удалось включить enforce_admins\n' "$repo" "$branch"
+      return 1
+    fi
+    return 0
   fi
 
   check_protection_exists "$repo" "$branch"
