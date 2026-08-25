@@ -116,9 +116,25 @@ bash tests/test_one_command_at_a_time.sh        # red-green тесты хука 
 **разрешение symlink через `readlink`** в цикле — без него `BASH_SOURCE` указал бы на
 `~/bin`, и реестр искался бы в `~/registry.json`.
 
+### `bin/` — CLI-утилиты этого репо
+
+- **`hookctl`** — контроллер реестра хуков (см. выше).
+- **`merge-guard`** — branch protection на GitHub, см. пункт в «Конвенции» ниже.
+- **`timeout-fix`** — фикс бага `timeout`/`gtimeout` на macOS (claude-tools#2 →
+  anthropics/claude-code #3361 / #10600 / #79056).
+- **`permission-mode`** — отключение auto-классификатора Claude Code
+  (`disableAutoMode: "disable"`), atomic-правка `settings.json`.
+- **`permissions-audit`** — аудит + чистка `permissions.allow`: широкие паттерны
+  (`Bash(git:*)`/`Bash(*)`), секреты в `env`, deprecated/compound мусор; конфиг —
+  `permissions-audit.conf`.
+
+Все читают/пишут `~/.claude/settings.json` только атомарно (tmp-файл + `mv`, с бэкапом
+`.bak`), уважая `SETTINGS`/`CLAUDE_SETTINGS` для тестов.
+
 ### Скиллы (`skills/*/SKILL.md`)
 
-Тонкие обёртки над CLI для вызова из сессии Claude Code:
+Тонкие обёртки над CLI для вызова из сессии Claude Code. Специфичные для этого репо
+(симлинкуются `install.sh`):
 
 - **`/hooks`** — парсит `$ARGUMENTS` (`list|status|on <id>|off <id>|edit [id]|add`,
   понимает русские синонимы) и вызывает соответствующий `hookctl …`. Показывает вывод
@@ -126,6 +142,15 @@ bash tests/test_one_command_at_a_time.sh        # red-green тесты хука 
 - **`/fix`** — самостоятельный TDD-конвейер багфикса (красный тест → минимальный фикс →
   зелёный → mutation → линт → коммит с проверкой **committed ≠ staged** → PR с зелёным CI,
   **без мержа**). Нейтральный по языку, Python-дефолт (pytest/ruff/mutmut).
+- **`/issue-planner`** — разбивает GitHub-эпик на нативные sub-issues с оценками (LOC +
+  размер S/M/L/XL + минуты кода **и** ревью отдельно). Драйвер `subissue.sh` (обёртка над
+  `gh` + GraphQL `addSubIssue`) вызывается по **абсолютному** пути
+  `~/.claude/skills/issue-planner/subissue.sh` — работает благодаря симлинку из install.sh,
+  не через `PROJECT_DIR`.
+
+Каталог также содержит `skills/cleanup-procs/` и `skills/fewer-permission-prompts/` —
+это **общие пользовательские скиллы** (управление системными процессами / произвольным
+проектом), не специфичные для claude-tools и не связанные с его архитектурой.
 
 ## Конвенции
 

@@ -23,6 +23,8 @@ CLAUDE.md не лечат — агент их игнорирует. Лечит *
 - **`registry.json`** — источник правды для своих хуков.
 - **`skills/hooks/`** — slash-скилл `/hooks` (обёртка над hookctl).
 - **`skills/fix/`** — slash-скилл `/fix` (багфикс по строгому TDD).
+- **`skills/issue-planner/`** — slash-скилл `/issue-planner` (разбивка эпика на sub-issues
+  с оценками кода и ревью, драйвер `subissue.sh` поверх `gh` GraphQL).
 - **`skills/test-categories/`** — переносимый скилл `/test-categories` для безопасной категоризации тестов и live-действий.
 - **`tests/`** — bash-тесты (без фреймворка) для утилит `bin/`.
 
@@ -34,7 +36,8 @@ bash install.sh
 ```
 
 `install.sh` проверит `jq`, сделает `chmod +x`, symlink `~/bin/hookctl` и `~/bin/merge-guard`, симлинкнет
-скиллы `/fix`, `/hooks` и `/test-categories` в `~/.claude/skills/`, включит `git-branch-guard`. Боевой
+скиллы `/fix`, `/hooks`, `/issue-planner` и `/test-categories` в `~/.claude/skills/`, включит
+`git-branch-guard`. Боевой
 `~/.claude/settings.json` правится только через `hookctl` (с бэкапом `.bak`); чужие хуки
 (`SessionStart` context-heal и др.) сохраняются.
 
@@ -282,9 +285,13 @@ claude-tools/
 │   ├── test_permissions_audit.sh
 │   └── test_one_command_at_a_time.sh
 └── skills/
-    ├── hooks/SKILL.md      # /hooks
-    ├── fix/SKILL.md        # /fix
-    └── test-categories/SKILL.md  # /test-categories
+    ├── hooks/SKILL.md             # /hooks
+    ├── fix/SKILL.md               # /fix
+    ├── issue-planner/             # /issue-planner
+    │   ├── SKILL.md
+    │   ├── estimate.md
+    │   └── subissue.sh
+    └── test-categories/SKILL.md   # /test-categories
 ```
 
 ## Проверка после установки
