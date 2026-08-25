@@ -101,17 +101,31 @@ shift
 METHOD="GET"
 ENDPOINT=""
 INCLUDE=0
+JQ_EXPR=""
+NEXT_IS_METHOD=0
+NEXT_IS_JQ=0
 for arg in "$@"; do
+  if [ "$NEXT_IS_METHOD" = "1" ]; then METHOD="$arg"; NEXT_IS_METHOD=0; continue; fi
+  if [ "$NEXT_IS_JQ" = "1" ]; then JQ_EXPR="$arg"; NEXT_IS_JQ=0; continue; fi
   case "$arg" in
     -X) NEXT_IS_METHOD=1 ;;
-    *)
-      if [ "${NEXT_IS_METHOD:-0}" = "1" ]; then METHOD="$arg"; NEXT_IS_METHOD=0;
-      elif [ "$arg" = "-i" ]; then INCLUDE=1;
-      elif [ "$arg" = "--silent" ] || [ "$arg" = "--paginate" ]; then :;
-      elif [[ "$arg" != -* ]] && [ -z "$ENDPOINT" ]; then ENDPOINT="$arg"; fi
-      ;;
+    --jq|-q) NEXT_IS_JQ=1 ;;
+    -i) INCLUDE=1 ;;
+    --silent|--paginate) : ;;
+    -*) : ;;
+    *) [ -z "$ENDPOINT" ] && ENDPOINT="$arg" ;;
   esac
 done
+
+# Применяет --jq к телу ответа, если оно было передано (имитация реального gh api --jq).
+apply_jq() {
+  # apply_jq <json-body>
+  if [ -n "$JQ_EXPR" ]; then
+    printf '%s' "$1" | jq -r "$JQ_EXPR"
+  else
+    printf '%s\n' "$1"
+  fi
+}
 
 status_line() {
   # status_line <code>
@@ -145,9 +159,16 @@ case "$ENDPOINT" in
   repos/*/branches/*/protection/enforce_admins)
     case "$METHOD" in
       GET)
-        code="${GH_MOCK_ENFORCE_ADMINS_STATUS:-200}"
-        [ "$INCLUDE" = "1" ] && status_line "$code"
-        [ "$code" = "200" ] && exit 0 || exit 1
+        # Реальный GitHub: этот sub-endpoint 200 и при true, и при false
+        # (404 только когда protection нет вообще) — мок отражает это:
+        # GH_MOCK_ENFORCE_ADMINS_HTTP управляет HTTP-ошибками (404/403/пусто),
+        # GH_MOCK_ENFORCE_ADMINS_ENABLED — значением .enabled при HTTP 200.
+        http="${GH_MOCK_ENFORCE_ADMINS_HTTP:-200}"
+        if [ "$http" != "200" ]; then
+          exit 1
+        fi
+        apply_jq "{\"enabled\": ${GH_MOCK_ENFORCE_ADMINS_ENABLED:-true}}"
+        exit 0
         ;;
       POST)
         exit "${GH_MOCK_WRITE_EXIT:-0}"
@@ -171,7 +192,7 @@ case "$ENDPOINT" in
     esac
     ;;
   repos/*)
-    echo "{\"default_branch\": \"${GH_MOCK_DEFAULT_BRANCH:-main}\"}"
+    apply_jq "{\"default_branch\": \"${GH_MOCK_DEFAULT_BRANCH:-main}\"}"
     exit 0
     ;;
   *)
@@ -294,24 +315,42 @@ t11_status_reviews_enabled() {
 }
 
 # 12. Idempotent-skip НЕ должен пропускать enforce_admins: если reviews уже
-#     включены (200), но enforce_admins ещё false (репо защищён старой версией
-#     скрипта или предыдущий POST упал) — enable_repo обязан дожать enforce_admins,
-#     а не молча вернуть "уже включена".
+#     включены (200), но enforce_admins.enabled=false в теле (реальный GitHub:
+#     этот sub-endpoint 200 и при true, и при false — 404 бывает только когда
+#     protection нет вообще) — enable_repo обязан дожать enforce_admins POST-ом,
+#     а не молча вернуть "уже включена". Regression-тест на cycle-3 находку
+#     Codex: код неправильно трактовал HTTP 200 как enforce_admins=true.
 t12_idempotent_skip_still_fixes_enforce_admins() {
   setup; make_gh
-  GH_MOCK_REVIEWS_STATUS=200 GH_MOCK_ENFORCE_ADMINS_STATUS=404 \
+  GH_MOCK_REVIEWS_STATUS=200 GH_MOCK_ENFORCE_ADMINS_HTTP=200 GH_MOCK_ENFORCE_ADMINS_ENABLED=false \
     run_mg enable owner/repo-a >/dev/null 2>&1
-  assert_match "enforce_admins" "$GH_LOG" "t12: reviews=200 но enforce_admins=404 → всё равно дёргает enforce_admins POST"
+  assert_match "X POST repos/owner/repo-a/branches/main/protection/enforce_admins" "$GH_LOG" \
+    "t12: reviews=200 но enforce_admins body {enabled:false} (тоже HTTP 200!) → всё равно шлёт POST enforce_admins"
   teardown
 }
 
-# 13. Настоящий idempotent-skip: reviews=200 И enforce_admins уже true —
+# 13. Настоящий idempotent-skip: reviews=200 И enforce_admins.enabled=true —
 #     тогда действительно ничего не долается (нет лишних write-вызовов).
 t13_true_idempotent_skip_when_both_enabled() {
   setup; make_gh
   local out
-  out="$(GH_MOCK_REVIEWS_STATUS=200 GH_MOCK_ENFORCE_ADMINS_STATUS=200 run_mg enable owner/repo-a 2>&1)"
-  assert_match "уже включена" <(echo "$out") "t13: reviews=200 и enforce_admins=200 → настоящий idempotent skip"
+  out="$(GH_MOCK_REVIEWS_STATUS=200 GH_MOCK_ENFORCE_ADMINS_HTTP=200 GH_MOCK_ENFORCE_ADMINS_ENABLED=true \
+    run_mg enable owner/repo-a 2>&1)"
+  assert_match "уже включена" <(echo "$out") "t13: reviews=200 и enforce_admins.enabled=true → настоящий idempotent skip"
+  teardown
+}
+
+# 14. check_enforce_admins_enabled: настоящая ошибка API (404 — protection
+#     нет вообще) должна прерывать enable_repo fail-closed, а не молча
+#     трактоваться как false (это отдельная ветка от t6/t5, где enable_repo
+#     уже проверил, что protection существует через check_protection_exists —
+#     но enforce_admins-запрос теоретически может словить свою ошибку,
+#     например rate-limit, независимо от протекшна).
+t14_enforce_admins_api_error_fails_closed() {
+  setup; make_gh
+  local out
+  out="$(GH_MOCK_REVIEWS_STATUS=200 GH_MOCK_ENFORCE_ADMINS_HTTP=403 run_mg enable owner/repo-a 2>&1)"
+  assert_match "ОШИБКА" <(echo "$out") "t14: enforce_admins API error (403) → ОШИБКА, fail-closed"
   teardown
 }
 
@@ -321,7 +360,8 @@ run_all() {
            t4_reviews_403_fails_closed t5_protection_403_no_destructive_put t6_protection_404_goes_to_put \
            t7_put_payload_enforce_admins_true t8_patch_branch_calls_enforce_admins \
            t9_disable_403_fails_closed t10_status_403_shows_error_not_absent t11_status_reviews_enabled \
-           t12_idempotent_skip_still_fixes_enforce_admins t13_true_idempotent_skip_when_both_enabled; do
+           t12_idempotent_skip_still_fixes_enforce_admins t13_true_idempotent_skip_when_both_enabled \
+           t14_enforce_admins_api_error_fails_closed; do
     "$t"
   done
 }

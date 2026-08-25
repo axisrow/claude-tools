@@ -81,19 +81,18 @@ check_protection_exists() {
   esac
 }
 
-# Проверяет, включён ли enforce_admins на ветке (тот же HTTP-статус паттерн,
-# что и check_reviews_enabled). Выводит "true" (200) / "false" (404) / "" (иная
-# ошибка — вызывающий код обязан прервать операцию, не трактовать как false).
+# Проверяет, включён ли enforce_admins на ветке.
+# ВАЖНО: в отличие от required_pull_request_reviews, этот sub-endpoint
+# возвращает HTTP 200 с телом {"enabled": true|false} и при true, и при
+# false (404 бывает только когда protection на ветке нет вообще) —
+# поэтому здесь, в отличие от check_reviews_enabled/check_protection_exists,
+# статус-код НЕ несёт нужной информации и нужно читать поле .enabled из тела.
+# Выводит "true" / "false" / "" (ошибка API — вызывающий код обязан
+# прервать операцию, не трактовать пустой вывод как "false").
 check_enforce_admins_enabled() {
   local repo="$1" branch="$2"
-  local http_status
-  http_status="$(gh api -i --silent "repos/$repo/branches/$branch/protection/enforce_admins" \
-    2>/dev/null | awk 'NR==1{print $2; exit}')"
-  case "$http_status" in
-    200) echo "true" ;;
-    404) echo "false" ;;
-    *) echo "" ;;
-  esac
+  gh api "repos/$repo/branches/$branch/protection/enforce_admins" \
+    --jq '.enabled' 2>/dev/null || true
 }
 
 # --- операции -----------------------------------------------------------------
