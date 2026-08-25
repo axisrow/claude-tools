@@ -5,7 +5,7 @@
 #   1. Проверяет jq (нужен hookctl и хуку).
 #   2. chmod +x на hookctl и git-branch-guard.sh.
 #   3. symlink hookctl в ~/bin (он уже в PATH у этого пользователя).
-#   4. symlink скиллов /fix и /hooks в ~/.claude/skills/.
+#   4. symlink скиллов /fix, /hooks и /test-categories в ~/.claude/skills/.
 #   5. Первый regenerate: включает git-branch-guard в ~/.claude/settings.json
 #      (SessionStart и прочие чужие хуки сохраняются — см. модель hookctl).
 #
@@ -24,8 +24,9 @@ echo "✓ jq: $(jq --version)"
 
 # --- 2. права на исполнение -------------------------------------------------
 chmod +x "$SCRIPT_DIR/bin/hookctl"
+chmod +x "$SCRIPT_DIR/bin/merge-guard"
 chmod +x "$SCRIPT_DIR/hooks/git-branch-guard.sh"
-echo "✓ chmod +x bin/hookctl hooks/git-branch-guard.sh"
+echo "✓ chmod +x bin/hookctl bin/merge-guard hooks/git-branch-guard.sh"
 
 # --- 3. symlink в ~/bin -----------------------------------------------------
 INSTALL_DIR="$HOME/bin"
@@ -37,6 +38,13 @@ fi
 ln -s "$SCRIPT_DIR/bin/hookctl" "$LINK"
 echo "✓ symlink: $LINK -> $SCRIPT_DIR/bin/hookctl"
 
+LINK="$INSTALL_DIR/merge-guard"
+if [ -L "$LINK" ] || [ -e "$LINK" ]; then
+  rm -f "$LINK"
+fi
+ln -s "$SCRIPT_DIR/bin/merge-guard" "$LINK"
+echo "✓ symlink: $LINK -> $SCRIPT_DIR/bin/merge-guard"
+
 case ":$PATH:" in
   *":$INSTALL_DIR:"*) ;;
   *) echo "  ⚠ $INSTALL_DIR не в PATH. Добавьте в ~/.zshrc: export PATH=\"$INSTALL_DIR:\$PATH\"" ;;
@@ -47,7 +55,15 @@ esac
 # живая связь с skills/ полезнее копии — правка скилла видна сразу, без переустановки.
 SKILLS_DIR="$HOME/.claude/skills"
 mkdir -p "$SKILLS_DIR"
-for skill in fix hooks; do
+# Не удаляем пользовательский каталог с таким именем: установка должна быть
+# обратимой и не терять чужой skill при последующей ошибке. Симлинк можно
+# безопасно заменить на управляемый репозиторием.
+TEST_CATEGORIES_TARGET="$SKILLS_DIR/test-categories"
+if [ -e "$TEST_CATEGORIES_TARGET" ] && [ ! -L "$TEST_CATEGORIES_TARGET" ]; then
+  echo "✗ $TEST_CATEGORIES_TARGET уже существует как каталог/файл; удалите или перенесите его вручную" >&2
+  exit 1
+fi
+for skill in fix hooks test-categories; do
   TARGET="$SKILLS_DIR/$skill"
   # Убираем что угодно на этом месте: устаревший symlink или старую копию-каталог.
   if [ -L "$TARGET" ] || [ -e "$TARGET" ]; then

@@ -144,6 +144,11 @@ bash tests/test_one_command_at_a_time.sh        # red-green тесты хука 
   Не пытайся покрыть всё сразу — расширяй **только по реальным false-positives** из живой сессии
   (TDD: тест-first под замеченную боль). Если парсер обрастает исключениями — переходи на
   `bashlex`/`mvdan/sh`. Known limitations (`bash -c`, `eval`, `ssh`, одиночный `&`) — в README.
+- **`bin/merge-guard` — branch protection на GitHub.** Массово включает
+  `required_pull_request_reviews` на default-ветке всех личных репо через `gh api`. Не хук, а CLI:
+  вызывается вручную (`merge-guard enable` / `disable` / `status`). PATCH при наличии защиты (сохраняет
+  status checks и прочие rules), PUT при отсутствии. Forks/archived пропускаются. Idempotent.
+  См. claude-tools#12.
 - **Сначала ручное тестирование, потом автоматизация.** Любая новая CLI-утилита/фикс
   сначала прогоняется вручную на боевой системе и проверяется end-to-end, и только
   **после** подтверждения, что поведение верное, добавляется в `install.sh` / автоматические
