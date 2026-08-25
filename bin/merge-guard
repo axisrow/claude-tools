@@ -251,6 +251,306 @@ status_repo() {
   esac
 }
 
+# --- rollout: гейт «есть комментарий на PR» ------------------------------------
+#
+# Раскатывает по репо workflow-файл, который постит commit status
+# CHECK_NAME на head-SHA каждого PR, и включает этот контекст в
+# required_status_checks branch protection. Merge PR без единого комментария
+# блокируется на стороне GitHub — независимо от того, какой агентский харнесс
+# вызывает gh pr merge. Настройки — в конфиге (--config):
+#   CHECK_NAME=merge-guard/review-comment   имя status check
+#   MIN_COMMENTS=1                          сколько комментариев нужно
+#   REPOS=all                               all | список owner/repo через запятую
+#   EXCLUDE=                                список owner/repo через запятую
+
+# Шаблон workflow-гейта. __CHECK_NAME__ / __MIN_COMMENTS__ подставляются при
+# заливке (render_gate_workflow). Кавычки heredoc — одинарные, чтобы ${{ ... }}
+# GitHub Actions остались как есть.
+GATE_WORKFLOW_TEMPLATE='name: require-review-comment
+
+# Гейт «есть комментарий на PR» — раскатывается merge-guard rollout.
+# Блокирует merge PR, на котором нет ни одного комментария, независимо от
+# того, какой агентский харнесс вызывает gh pr merge. См. claude-tools#12.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  statuses: write
+  pull-requests: read
+  issues: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post pending status
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHECK_NAME: __CHECK_NAME__
+        run: |
+          gh api -X POST "repos/${{ github.repository }}/statuses/${{ github.event.pull_request.head.sha }}" \
+            -f state=pending \
+            -f context="$CHECK_NAME" \
+            -f description="Проверяю наличие комментариев на PR…"
+
+      - name: Count PR comments
+        id: count
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          n="$(gh api "repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments" --jq length)"
+          echo "count=$n" >> "$GITHUB_OUTPUT"
+
+      - name: Post result status
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHECK_NAME: __CHECK_NAME__
+          MIN_COMMENTS: __MIN_COMMENTS__
+        run: |
+          n="${{ steps.count.outputs.count }}"
+          if [ "$n" -ge "$MIN_COMMENTS" ]; then
+            state=success
+            desc="Есть комментарий на PR — merge разрешён"
+          else
+            state=failure
+            desc="Нет ни одного комментария на PR — merge заблокирован"
+          fi
+          gh api -X POST "repos/${{ github.repository }}/statuses/${{ github.event.pull_request.head.sha }}" \
+            -f state="$state" \
+            -f context="$CHECK_NAME" \
+            -f description="$desc"
+'
+
+# Читает KEY=VALUE из конфига (последнее вхождение побеждает, # — комментарий).
+read_config() {
+  local file="$1" key="$2" default="${3:-}"
+  local val
+  val="$(sed -n "s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*//p" "$file" 2>/dev/null | tail -1)"
+  [ -n "$val" ] && echo "$val" || echo "$default"
+}
+
+# Подставляет CHECK_NAME/MIN_COMMENTS в шаблон workflow.
+render_gate_workflow() {
+  local check_name="$1" min_comments="$2"
+  printf '%s' "$GATE_WORKFLOW_TEMPLATE" \
+    | sed "s|__CHECK_NAME__|$check_name|g; s|__MIN_COMMENTS__|$min_comments|g"
+}
+
+# Проверяет workflow-файл в репо: 0 = уже актуален, 1 = нет/отличается,
+# 2 = ошибка API (403/5xx/rate-limit — fail-closed, не перезаливать вслепую).
+check_gate_file() {
+  local repo="$1" path="$2" content="$3"
+  local body http_status
+  body="$(gh api -i --silent "repos/$repo/contents/$path" 2>/dev/null)"
+  http_status="$(printf '%s' "$body" | awk 'NR==1{print $2; exit}')"
+  case "$http_status" in
+    200)
+      local existing
+      existing="$(printf '%s' "$body" | sed -n '/^{/,$p' | jq -r '.content' 2>/dev/null | base64 -d 2>/dev/null)"
+      [ "$existing" = "$content" ] && return 0 || return 1
+      ;;
+    404) return 1 ;;
+    *) return 2 ;;
+  esac
+}
+
+# Заливает workflow-файл через Contents API (создаёт или обновляет по sha).
+put_gate_file() {
+  local repo="$1" path="$2" content="$3"
+  local sha="" body
+  body="$(gh api "repos/$repo/contents/$path" 2>/dev/null || true)"
+  sha="$(printf '%s' "$body" | jq -r '.sha // empty' 2>/dev/null)"
+  local payload
+  payload="$(jq -n \
+    --arg content "$(printf '%s' "$content" | base64 | tr -d '\n')" \
+    --arg message "merge-guard: гейт «есть комментарий на PR»" \
+    --arg sha "$sha" \
+    '{message: $message, content: $content} + (if $sha != "" then {sha: $sha} else {} end)')"
+  printf '%s' "$payload" | gh api -X PUT "repos/$repo/contents/$path" --input - >/dev/null 2>&1
+}
+
+# Включает CHECK_NAME в required_status_checks на ветке.
+# Защита есть — PATCH (сохраняет strict и существующие контексты);
+# защиты нет — PUT (создаёт с required_status_checks, БЕЗ required reviews:
+# на одноперсональных репо reviews не работает — автор не апрувит свой PR).
+enable_gate_protection() {
+  local repo="$1" branch="$2" check_name="$3"
+
+  check_protection_exists "$repo" "$branch"
+  local ps=$?
+  if [ "$ps" -eq 2 ]; then
+    printf '  ✗ %-50s %s — ОШИБКА: не удалось проверить protection (API error)\n' "$repo" "$branch"
+    return 1
+  fi
+
+  if [ "$ps" -eq 0 ]; then
+    # Защита есть — PATCH required_status_checks.
+    local body http_status json
+    body="$(gh api -i --silent "repos/$repo/branches/$branch/protection/required_status_checks" 2>/dev/null)"
+    http_status="$(printf '%s' "$body" | awk 'NR==1{print $2; exit}')"
+    case "$http_status" in
+      200)
+        json="$(printf '%s' "$body" | sed -n '/^{/,$p')"
+        if printf '%s' "$json" | jq -e --arg c "$check_name" '.contexts | index($c)' >/dev/null 2>&1; then
+          printf '  ✓ %-50s %s — гейт уже в required checks (idempotent skip)\n' "$repo" "$branch"
+          return 0
+        fi
+        local payload
+        payload="$(printf '%s' "$json" | jq --arg c "$check_name" '{strict: .strict, contexts: (.contexts + [$c] | unique)}')"
+        if printf '%s' "$payload" | gh api -X PATCH \
+            "repos/$repo/branches/$branch/protection/required_status_checks" \
+            --input - >/dev/null 2>&1; then
+          printf '  ✓ %-50s %s — required check %s добавлен\n' "$repo" "$branch" "$check_name"
+          sleep "$SLEEP"
+          return 0
+        fi
+        printf '  ✗ %-50s %s — ОШИБКА PATCH required_status_checks\n' "$repo" "$branch"
+        return 1
+        ;;
+      404)
+        if gh api -X PATCH "repos/$repo/branches/$branch/protection/required_status_checks" \
+            -f strict=true -f "contexts[]=$check_name" >/dev/null 2>&1; then
+          printf '  ✓ %-50s %s — required check %s включён\n' "$repo" "$branch" "$check_name"
+          sleep "$SLEEP"
+          return 0
+        fi
+        printf '  ✗ %-50s %s — ОШИБКА PATCH required_status_checks\n' "$repo" "$branch"
+        return 1
+        ;;
+      *)
+        printf '  ✗ %-50s %s — ОШИБКА: не удалось прочитать required_status_checks (API error)\n' "$repo" "$branch"
+        return 1
+        ;;
+    esac
+  fi
+
+  # Защиты нет (404) — PUT: создаём с required_status_checks, без reviews.
+  printf '  PUT %-50s %s — создаю защиту с required check %s …\n' "$repo" "$branch" "$check_name"
+  if printf '%s\n' "{
+  \"required_status_checks\": {\"strict\": true, \"contexts\": [\"$check_name\"]},
+  \"enforce_admins\": true,
+  \"required_pull_request_reviews\": null,
+  \"restrictions\": null,
+  \"allow_force_pushes\": false,
+  \"allow_deletions\": false
+}" | gh api -X PUT "repos/$repo/branches/$branch/protection" --input - >/dev/null 2>&1; then
+    printf '  ✓ %-50s %s — защита создана (required check %s, admin enforcement on)\n' "$repo" "$branch" "$check_name"
+    sleep "$SLEEP"
+    return 0
+  fi
+  printf '  ✗ %-50s %s — ОШИБКА PUT protection\n' "$repo" "$branch"
+  return 1
+}
+
+# Раскатывает гейт на одно репо: workflow-файл + required status check.
+rollout_repo() {
+  local repo="$1" branch="$2" check_name="$3" min_comments="$4" dry_run="$5"
+  local path=".github/workflows/require-review-comment.yml"
+  local content
+  content="$(render_gate_workflow "$check_name" "$min_comments")"
+
+  # 1. Workflow-файл.
+  check_gate_file "$repo" "$path" "$content"
+  local fstatus=$?
+  if [ "$fstatus" -eq 2 ]; then
+    printf '  ✗ %-50s — ОШИБКА: не удалось проверить %s (API error)\n' "$repo" "$path"
+    return 1
+  fi
+  if [ "$fstatus" -eq 1 ]; then
+    if [ "$dry_run" = "1" ]; then
+      printf '  ~ %-50s — [dry-run] залил бы %s\n' "$repo" "$path"
+    else
+      if put_gate_file "$repo" "$path" "$content"; then
+        printf '  ✓ %-50s — %s залит\n' "$repo" "$path"
+        sleep "$SLEEP"
+      else
+        printf '  ✗ %-50s — ОШИБКА: не удалось залить %s\n' "$repo" "$path"
+        return 1
+      fi
+    fi
+  else
+    printf '  ○ %-50s — %s уже актуален\n' "$repo" "$path"
+  fi
+
+  # 2. Branch protection.
+  if [ "$dry_run" = "1" ]; then
+    printf '  ~ %-50s — [dry-run] включил бы required check %s на %s\n' "$repo" "$check_name" "$branch"
+    return 0
+  fi
+  enable_gate_protection "$repo" "$branch" "$check_name"
+}
+
+cmd_rollout() {
+  local config="" dry_run=0 target=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --config) config="${2:-}"; shift 2 ;;
+      --dry-run) dry_run=1; shift ;;
+      --repo) target="${2:-}"; shift 2 ;;
+      *) die "rollout: неизвестный аргумент: $1" ;;
+    esac
+  done
+  check_gh_auth
+  [ -n "$config" ] || die "rollout требует --config <файл>"
+  [ -f "$config" ] || die "rollout: конфиг не найден: $config"
+
+  local check_name min_comments repos exclude
+  check_name="$(read_config "$config" CHECK_NAME "merge-guard/review-comment")"
+  min_comments="$(read_config "$config" MIN_COMMENTS "1")"
+  repos="$(read_config "$config" REPOS "all")"
+  exclude="$(read_config "$config" EXCLUDE "")"
+
+  # Список репо: --repo > REPOS из конфига > все личные.
+  local repo_list
+  if [ -n "$target" ]; then
+    repo_list="$target"
+  elif [ "$repos" = "all" ]; then
+    repo_list="$(list_repos)"
+  else
+    repo_list="$(printf '%s' "$repos" | tr ',' '\n')"
+  fi
+  [ -z "$repo_list" ] && { echo "Нет репо для rollout"; return 0; }
+
+  # EXCLUDE-фильтр.
+  if [ -n "$exclude" ]; then
+    local excl_pat
+    excl_pat="$(printf '%s' "$exclude" | tr ',' '\n' | sed 's/^/^/; s/$/$/' | paste -sd'|' -)"
+    repo_list="$(printf '%s\n' "$repo_list" | grep -vE "$excl_pat" || true)"
+  fi
+
+  local count
+  count="$(printf '%s\n' "$repo_list" | grep -c . || true)"
+  echo "Rollout гейта «${check_name}» (мин. $min_comments комментариев) на $count репо"
+  [ "$dry_run" = "1" ] && echo "DRY-RUN: ничего не пишу"
+  echo
+
+  local err=0 ok=0 skipped=0 repo branch
+  while IFS= read -r repo; do
+    [ -z "$repo" ] && continue
+    branch="$(get_default_branch "$repo" 2>/dev/null)" || {
+      printf '  ⚠ %-50s — пропущен (нет default branch)\n' "$repo"
+      skipped=$((skipped+1))
+      continue
+    }
+    [ -z "$branch" ] && {
+      printf '  ⚠ %-50s — пропущен (нет default branch)\n' "$repo"
+      skipped=$((skipped+1))
+      continue
+    }
+    if rollout_repo "$repo" "$branch" "$check_name" "$min_comments" "$dry_run"; then
+      ok=$((ok+1))
+    else
+      err=$((err+1))
+    fi
+  done <<< "$repo_list"
+
+  echo
+  echo "Итого: $ok готово, $skipped пропущено, $err ошибок"
+  [ "$err" -gt 0 ] && return 1
+}
+
 # --- команды (итерация по репо или конкретный репо) ---------------------------
 
 cmd_enable() {
@@ -393,12 +693,19 @@ merge-guard — управление branch protection на GitHub:
   merge-guard enable  [REPO]   включить required_pull_request_reviews
   merge-guard disable [REPO]   отключить reviews (не трогает остальные rules)
   merge-guard status  [REPO]   показать статус (read-only)
+  merge-guard rollout --config <файл> [--dry-run] [--repo REPO]
+                               раскатать гейт «есть комментарий на PR»:
+                               залить workflow + включить required status check
   merge-guard --help  | -h     эта справка
 
 REPO — конкретное репо (owner/repo). Без аргумента — все личные репо.
 Forks и archived-репо пропускаются. Idempotent: повторный enable/disable безопасен.
 Существующие branch protection rules (status checks, restrictions) сохраняются —
 используется PATCH при наличии защиты, не PUT.
+
+rollout: конфиг (--config) — CHECK_NAME, MIN_COMMENTS, REPOS, EXCLUDE.
+Workflow-гейт постит commit status на каждый PR; merge без единого комментария
+блокируется required check'ом на стороне GitHub (см. claude-tools#12).
 
 Sleep между write-операциями: ${SLEEP}s (переопределить через MERGE_GUARD_SLEEP).
 EOF
@@ -409,6 +716,7 @@ case "${1:-}" in
   enable)  shift; cmd_enable "$@" ;;
   disable) shift; cmd_disable "$@" ;;
   status)  shift; cmd_status "$@" ;;
+  rollout) shift; cmd_rollout "$@" ;;
   --help|-h|"") usage ;;
   *) echo "merge-guard: неизвестная команда: $1" >&2; echo; usage; exit 1 ;;
 esac

@@ -176,6 +176,25 @@ case "$ENDPOINT" in
       *) echo "gh-mock: unexpected method $METHOD for enforce_admins sub-endpoint" >&2; exit 2 ;;
     esac
     ;;
+  repos/*/branches/*/protection/required_status_checks)
+    case "$METHOD" in
+      GET)
+        code="${GH_MOCK_RSC_STATUS:-200}"
+        [ "$INCLUDE" = "1" ] && status_line "$code"
+        if [ "$code" = "200" ]; then
+          # GH_MOCK_RSC_CONTEXTS — csv контекстов; strict фиксирован true.
+          contexts_json="$(printf '%s' "${GH_MOCK_RSC_CONTEXTS:-}" | awk -F, '{printf "["; sep=""; for(i=1;i<=NF;i++){if($i!=""){printf "%s\"%s\"", sep, $i; sep=","}} print "]"}')"
+          printf '{"strict": true, "contexts": %s}\n' "$contexts_json"
+          exit 0
+        fi
+        exit 1
+        ;;
+      PATCH)
+        exit "${GH_MOCK_WRITE_EXIT:-0}"
+        ;;
+      *) echo "gh-mock: unexpected method $METHOD for required_status_checks" >&2; exit 2 ;;
+    esac
+    ;;
   repos/*/branches/*/protection)
     case "$METHOD" in
       GET)
@@ -189,6 +208,23 @@ case "$ENDPOINT" in
         exit "${GH_MOCK_WRITE_EXIT:-0}"
         ;;
       *) echo "gh-mock: unexpected method $METHOD for protection endpoint" >&2; exit 2 ;;
+    esac
+    ;;
+  repos/*/contents/.github/workflows/require-review-comment.yml)
+    case "$METHOD" in
+      GET)
+        code="${GH_MOCK_GATE_FILE_STATUS:-404}"
+        [ "$INCLUDE" = "1" ] && status_line "$code"
+        if [ "$code" = "200" ]; then
+          printf '{"content": "%s"}\n' "${GH_MOCK_GATE_FILE_CONTENT:-}"
+          exit 0
+        fi
+        exit 1
+        ;;
+      PUT)
+        exit "${GH_MOCK_WRITE_EXIT:-0}"
+        ;;
+      *) echo "gh-mock: unexpected method $METHOD for gate workflow file" >&2; exit 2 ;;
     esac
     ;;
   repos/*)
@@ -354,6 +390,111 @@ t14_enforce_admins_api_error_fails_closed() {
   teardown
 }
 
+# --- rollout: гейт «есть комментарий на PR» -----------------------------------
+
+make_config() {
+  # make_config <file> [EXCLUDE]
+  local file="$1" exclude="${2:-}"
+  cat > "$file" <<EOF
+CHECK_NAME=merge-guard/review-comment
+MIN_COMMENTS=1
+REPOS=all
+EXCLUDE=$exclude
+EOF
+}
+
+# 15. rollout на репо без protection: заливает workflow-файл И создаёт защиту
+#     через PUT (с required_status_checks, без required reviews).
+t15_rollout_no_protection_creates_put() {
+  setup; make_gh
+  local cfg="$WORK/merge-guard.conf"
+  make_config "$cfg"
+  local out
+  out="$(GH_MOCK_PROTECTION_STATUS=404 GH_MOCK_GATE_FILE_STATUS=404 \
+    run_mg rollout --config "$cfg" --repo owner/repo-a 2>&1)"
+  assert_match "залит" <(echo "$out") "t15: rollout заливает workflow-файл"
+  assert_match "создаю защиту" <(echo "$out") "t15: rollout без protection идёт в PUT (создаёт защиту)"
+  assert_match "X PUT repos/owner/repo-a/contents/.github/workflows/require-review-comment.yml" "$GH_LOG" \
+    "t15: workflow-файл заливается через Contents API"
+  assert_match "X PUT repos/owner/repo-a/branches/main/protection" "$GH_LOG" \
+    "t15: protection создаётся через PUT"
+  teardown
+}
+
+# 16. rollout на репо с защитой, где контекста ещё нет: PATCH
+#     required_status_checks (добавляет контекст, сохраняя существующие).
+t16_rollout_existing_protection_patches_rsc() {
+  setup; make_gh
+  local cfg="$WORK/merge-guard.conf"
+  make_config "$cfg"
+  local out
+  out="$(GH_MOCK_PROTECTION_STATUS=200 GH_MOCK_RSC_STATUS=200 GH_MOCK_RSC_CONTEXTS="other-check" \
+    GH_MOCK_GATE_FILE_STATUS=404 run_mg rollout --config "$cfg" --repo owner/repo-a 2>&1)"
+  assert_match "добавлен" <(echo "$out") "t16: rollout добавляет контекст в required checks"
+  assert_match "X PATCH repos/owner/repo-a/branches/main/protection/required_status_checks" "$GH_LOG" \
+    "t16: PATCH required_status_checks (не PUT protection)"
+  assert_nomatch "X PUT repos/owner/repo-a/branches/main/protection" "$GH_LOG" \
+    "t16: существующая защита не перезаписывается PUT-ом"
+  teardown
+}
+
+# 17. Idempotency: контекст уже в required checks → skip, без PATCH.
+t17_rollout_existing_context_skips() {
+  setup; make_gh
+  local cfg="$WORK/merge-guard.conf"
+  make_config "$cfg"
+  local out
+  out="$(GH_MOCK_PROTECTION_STATUS=200 GH_MOCK_RSC_STATUS=200 GH_MOCK_RSC_CONTEXTS="merge-guard/review-comment" \
+    GH_MOCK_GATE_FILE_STATUS=404 run_mg rollout --config "$cfg" --repo owner/repo-a 2>&1)"
+  assert_match "idempotent skip" <(echo "$out") "t17: контекст уже есть → idempotent skip"
+  assert_nomatch "X PATCH repos/.*/required_status_checks" "$GH_LOG" \
+    "t17: при уже включённом контексте PATCH не шлётся"
+  teardown
+}
+
+# 18. Workflow-файл есть, но отличается от шаблона → перезаливается.
+t18_rollout_different_file_reuploads() {
+  setup; make_gh
+  local cfg="$WORK/merge-guard.conf"
+  make_config "$cfg"
+  local out
+  out="$(GH_MOCK_PROTECTION_STATUS=404 GH_MOCK_GATE_FILE_STATUS=200 \
+    GH_MOCK_GATE_FILE_CONTENT="$(printf 'old-content' | base64)" \
+    run_mg rollout --config "$cfg" --repo owner/repo-a 2>&1)"
+  assert_match "залит" <(echo "$out") "t18: отличающийся workflow-файл перезаливается"
+  assert_match "X PUT repos/owner/repo-a/contents/.github/workflows/require-review-comment.yml" "$GH_LOG" \
+    "t18: PUT contents при отличии файла"
+  teardown
+}
+
+# 19. --dry-run: показывает план, но не пишет (нет write-вызовов в логе).
+t19_rollout_dry_run_no_writes() {
+  setup; make_gh
+  local cfg="$WORK/merge-guard.conf"
+  make_config "$cfg"
+  local out
+  out="$(GH_MOCK_PROTECTION_STATUS=404 GH_MOCK_GATE_FILE_STATUS=404 \
+    run_mg rollout --config "$cfg" --dry-run --repo owner/repo-a 2>&1)"
+  assert_match "DRY-RUN" <(echo "$out") "t19: dry-run помечает прогон"
+  assert_match "\[dry-run\]" <(echo "$out") "t19: dry-run показывает, что сделал бы"
+  assert_nomatch "X PUT" "$GH_LOG" "t19: dry-run не делает write-вызовов"
+  teardown
+}
+
+# 20. EXCLUDE из конфига отфильтровывает репо из списка.
+t20_rollout_exclude_filters() {
+  setup; make_gh
+  local cfg="$WORK/merge-guard.conf"
+  make_config "$cfg" "owner/b"
+  local out
+  out="$(GH_MOCK_REPOS="owner/a
+owner/b" GH_MOCK_PROTECTION_STATUS=404 GH_MOCK_GATE_FILE_STATUS=404 \
+    run_mg rollout --config "$cfg" 2>&1)"
+  assert_match "owner/a" <(echo "$out") "t20: неисключённое репо обрабатывается"
+  assert_nomatch "owner/b" <(echo "$out") "t20: исключённое репо не обрабатывается"
+  teardown
+}
+
 # --- раннер -----------------------------------------------------------------
 run_all() {
   for t in t1_list_repos_uses_get t2_reviews_enabled_on_200 t3_reviews_disabled_on_404_not_403 \
@@ -361,7 +502,10 @@ run_all() {
            t7_put_payload_enforce_admins_true t8_patch_branch_calls_enforce_admins \
            t9_disable_403_fails_closed t10_status_403_shows_error_not_absent t11_status_reviews_enabled \
            t12_idempotent_skip_still_fixes_enforce_admins t13_true_idempotent_skip_when_both_enabled \
-           t14_enforce_admins_api_error_fails_closed; do
+           t14_enforce_admins_api_error_fails_closed \
+           t15_rollout_no_protection_creates_put t16_rollout_existing_protection_patches_rsc \
+           t17_rollout_existing_context_skips t18_rollout_different_file_reuploads \
+           t19_rollout_dry_run_no_writes t20_rollout_exclude_filters; do
     "$t"
   done
 }
