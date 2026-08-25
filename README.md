@@ -23,6 +23,8 @@ CLAUDE.md не лечат — агент их игнорирует. Лечит *
 - **`registry.json`** — источник правды для своих хуков.
 - **`skills/hooks/`** — slash-скилл `/hooks` (обёртка над hookctl).
 - **`skills/fix/`** — slash-скилл `/fix` (багфикс по строгому TDD).
+- **`skills/issue-planner/`** — slash-скилл `/issue-planner` (разбивка эпика на sub-issues
+  с оценками кода и ревью, драйвер `subissue.sh` поверх `gh` GraphQL).
 - **`tests/`** — bash-тесты (без фреймворка) для утилит `bin/`.
 
 ## Установка
@@ -281,8 +283,12 @@ claude-tools/
 │   ├── test_permissions_audit.sh
 │   └── test_one_command_at_a_time.sh
 └── skills/
-    ├── hooks/SKILL.md      # /hooks
-    └── fix/SKILL.md        # /fix
+    ├── hooks/SKILL.md          # /hooks
+    ├── fix/SKILL.md            # /fix
+    └── issue-planner/          # /issue-planner
+        ├── SKILL.md
+        ├── estimate.md
+        └── subissue.sh
 ```
 
 ## Проверка после установки
