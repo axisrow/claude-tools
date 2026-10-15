@@ -63,7 +63,7 @@ if [ -e "$TEST_CATEGORIES_TARGET" ] && [ ! -L "$TEST_CATEGORIES_TARGET" ]; then
   echo "✗ $TEST_CATEGORIES_TARGET уже существует как каталог/файл; удалите или перенесите его вручную" >&2
   exit 1
 fi
-for skill in fix hooks issue-planner test-categories; do
+for skill in fix hooks issue-planner project-trust test-categories; do
   TARGET="$SKILLS_DIR/$skill"
   # Убираем что угодно на этом месте: устаревший symlink или старую копию-каталог.
   if [ -L "$TARGET" ] || [ -e "$TARGET" ]; then

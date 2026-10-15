@@ -5,26 +5,15 @@ description: Проставляет hasTrustDialogAccepted=true проекту �
 
 # project-trust: trust для проекта без диалога
 
-1. Запиши скрипт ниже в `/tmp/project-trust.py` (Write, не инлайн).
-2. `python3 /tmp/project-trust.py <абсолютный путь проекта>` — путь как видит его
-   оболочка, без слэша на конце.
-3. Скрипт печатает `путь: старое -> True`; идемпотентен, повторный прогон безвреден.
+1. Запусти готовый скрипт (ничего не писать заново):
 
-```python
-import json, os, sys
+   ```
+   ~/.claude/skills/project-trust/project-trust.sh <абсолютный путь проекта>
+   ```
 
-proj = os.path.abspath(sys.argv[1])
-path = os.path.expanduser('~/.claude.json')
-with open(path) as f:
-    data = json.load(f)
-projects = data.setdefault('projects', {})
-old = projects.get(proj, {}).get('hasTrustDialogAccepted')
-projects.setdefault(proj, {})['hasTrustDialogAccepted'] = True
-with open(path + '.tmp', 'w') as f:
-    json.dump(data, f, ensure_ascii=False, indent=2)
-os.replace(path + '.tmp', path)  # атомарная замена: без частичного файла
-print(f'{proj}: {old} -> True')
-```
+   Путь — как видит его оболочка, без слэша на конце. Без аргумента — текущий
+   каталог. Зависимость: `jq`. Скрипт печатает `путь: старое -> true`;
+   идемпотентен, повторный прогон безвреден.
 
 Ограничения (не упрощать):
 
