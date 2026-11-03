@@ -64,7 +64,9 @@ case "$cmd" in
     [ -r "$body" ] || die "body file not readable: $body"
     [ -n "$parent" ] || die "empty parent node id"
     if [ "$dry" = "--dry-run" ]; then
-      gh label list --repo "$owner/$repo" --json name --jq '.[].name' | grep -qx "$label" \
+      # --limit 500: gh defaults to 30 labels, so repos with more labels give
+      # false "does not exist" on anything created late in the alphabet/order.
+      gh label list --repo "$owner/$repo" --limit 500 --json name --jq '.[].name' | grep -qx "$label" \
         || die "label '$label' does not exist in $owner/$repo (create it first)"
       echo "DRY-RUN: would create issue in $owner/$repo titled \"$title\" with label '$label', body $(wc -l <"$body") lines, then addSubIssue under $parent"
       exit 0
