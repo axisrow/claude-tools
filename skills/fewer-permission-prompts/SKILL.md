@@ -1,3 +1,8 @@
+---
+name: fewer-permission-prompts
+description: Scan your transcripts for common read-only Bash and MCP tool calls, then add a prioritized allowlist to project .claude/settings.json to reduce permission prompts.
+---
+
 # Fewer Permission Prompts
 
 Look through my transcripts' MCP and bash tool calls, and based on those, make a prioritized list of patterns that I should add to my permission allowlist to reduce permission prompts. Focus on read-only commands.

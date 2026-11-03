@@ -8,7 +8,42 @@
     {
       "name": "tools",
       "source": "./",
-      "description": "Все скиллы claude-tools: fix, hooks, issue-planner, project-trust, test-categories, cleanup-procs, fewer-permission-prompts. Скиллы доступны как /tools:<имя>."
+      "description": "Все скиллы claude-tools одним плагином: fix, hooks, issue-planner, project-trust, test-categories, cleanup-procs, fewer-permission-prompts. Скиллы доступны как /tools:<имя>."
+    },
+    {
+      "name": "fix",
+      "source": "./skills/fix",
+      "description": "Багфикс по строгому TDD-конвейеру: красный тест → минимальный фикс → зелёный → mutation → линт → коммит → PR без мержа."
+    },
+    {
+      "name": "hooks",
+      "source": "./skills/hooks",
+      "description": "Управление Claude Code хуками через hookctl: список, статус, вкл/выкл, реестр."
+    },
+    {
+      "name": "issue-planner",
+      "source": "./skills/issue-planner",
+      "description": "Разбивка GitHub-эпика на нативные sub-issues с оценками (LOC + S/M/L/XL + минуты кода и ревью)."
+    },
+    {
+      "name": "project-trust",
+      "source": "./skills/project-trust",
+      "description": "Проставляет hasTrustDialogAccepted=true проекту в ~/.claude.json — снимает диалог доверия при старте."
+    },
+    {
+      "name": "test-categories",
+      "source": "./skills/test-categories",
+      "description": "Категоризация тестов и live-действий: безопасные дефолты, изоляция внешних клиентов, permission-гейты."
+    },
+    {
+      "name": "cleanup-procs",
+      "source": "./skills/cleanup-procs",
+      "description": "Управление системными процессами: найти и убрать зависшие процессы проекта."
+    },
+    {
+      "name": "fewer-permission-prompts",
+      "source": "./skills/fewer-permission-prompts",
+      "description": "Скан транскриптов на частые read-only вызовы и приоритизированный allowlist в .claude/settings.json."
     }
   ]
 }

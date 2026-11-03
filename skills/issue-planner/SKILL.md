@@ -18,7 +18,7 @@ native-привязки.
 
 Скил глобальный. Драйвер `subissue.sh` лежит:
 - при symlink-установке (install.sh): `~/.claude/skills/issue-planner/subissue.sh` — этот путь используется в примерах ниже;
-- при установке как плагина (`/plugin install`): `${CLAUDE_PLUGIN_ROOT}/skills/issue-planner/subissue.sh` — подставляй его в примеры вместо symlink-пути.
+- при установке как плагина (`/plugin install`): отдельный плагин `issue-planner` — `${CLAUDE_PLUGIN_ROOT}/subissue.sh`; в составе плагина `tools` — `${CLAUDE_PLUGIN_ROOT}/skills/issue-planner/subissue.sh`. Подставляй в примеры вместо symlink-пути.
 В примерах ниже `OWNER REPO` — это `axisrow tg_content_factory`; для другого
 проекта подставить его owner/repo (или `gh repo view --json owner,name`).
 
