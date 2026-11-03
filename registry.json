@@ -11,6 +11,15 @@
       "enabled": true
     },
     {
+      "id": "ao-worker-no-launch",
+      "event": "PreToolUse",
+      "matcher": "Bash",
+      "command": "hooks/ao-worker-no-launch.sh",
+      "timeout": 5,
+      "statusMessage": "Гард: запрет запуска AO из worker-сессий",
+      "enabled": false
+    },
+    {
       "id": "one-command-at-a-time",
       "event": "PreToolUse",
       "matcher": "Bash",
