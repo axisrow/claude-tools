@@ -27,6 +27,14 @@
       "timeout": 5,
       "statusMessage": "Проверка: одна команда за раз",
       "enabled": false
+    },
+    {
+      "id": "auto-continue",
+      "event": "Stop",
+      "command": "hooks/auto-continue.mjs",
+      "timeout": 5,
+      "statusMessage": "Auto-continue after incomplete response",
+      "enabled": true
     }
   ]
 }
