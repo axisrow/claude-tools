@@ -2,8 +2,8 @@
 # install.sh — установка claude-tools на машину.
 #
 # Делает:
-#   1. Проверяет jq (нужен hookctl и хукам) и node (нужен hooks/auto-continue.mjs).
-#   2. chmod +x на hookctl, git-branch-guard.sh и auto-continue.mjs.
+#   1. Проверяет jq (нужен hookctl и bash-хукам) и node (нужен auto-continue-хукам).
+#   2. chmod +x на hookctl, git-branch-guard.sh и auto-continue-хуки.
 #   3. symlink hookctl в ~/bin (он уже в PATH у этого пользователя).
 #   4. symlink скиллов /fix, /hooks, /issue-planner и /test-categories в ~/.claude/skills/.
 #   5. Первый regenerate: включает git-branch-guard в ~/.claude/settings.json
@@ -22,7 +22,7 @@ if ! command -v jq >/dev/null 2>&1; then
 fi
 echo "✓ jq: $(jq --version)"
 if ! command -v node >/dev/null 2>&1; then
-  echo "⚠ node не найден — Stop-хук hooks/auto-continue.mjs не сможет запускаться (brew install node)" >&2
+  echo "⚠ node не найден — auto-continue-хуки (node) не смогут запускаться (brew install node)" >&2
 fi
 
 # --- 2. права на исполнение -------------------------------------------------
@@ -30,7 +30,9 @@ chmod +x "$SCRIPT_DIR/bin/hookctl"
 chmod +x "$SCRIPT_DIR/bin/merge-guard"
 chmod +x "$SCRIPT_DIR/hooks/git-branch-guard.sh"
 chmod +x "$SCRIPT_DIR/hooks/auto-continue.mjs"
-echo "✓ chmod +x bin/hookctl bin/merge-guard hooks/git-branch-guard.sh hooks/auto-continue.mjs"
+chmod +x "$SCRIPT_DIR/hooks/auto-continue-sf.sh"
+chmod +x "$SCRIPT_DIR/hooks/auto-continue-sf-child.mjs"
+echo "✓ chmod +x bin/hookctl bin/merge-guard hooks/git-branch-guard.sh hooks/auto-continue*"
 
 # --- 3. symlink в ~/bin -----------------------------------------------------
 INSTALL_DIR="$HOME/bin"

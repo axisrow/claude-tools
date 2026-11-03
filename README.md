@@ -142,14 +142,19 @@ skip. Dry-run: `AUTOCONTINUE_DRY_RUN=1`.
 per-session kill switch — `mkdir -p ~/.claude/claude-autocontinue-off && : > ~/.claude/claude-autocontinue-off/<session-id>`;
 другие API-ошибки (429/ECONNRESET — ретрай не всегда лечит); любые свои ошибки (fail-open).
 
-Лог: `~/.claude/claude-autocontinue.log` (`kind=block|cap|nostate`). Включение:
+Лог: `~/.claude/claude-autocontinue.log` — Stop-ветка: `kind=block|cap|nostate`;
+sf-ветка: `kind=ao-send|sf-cap|sf-off|sf-hasinput|sf-notfamily|sf-noassistant|sf-nonao|sf-busy|sf-noao|sf-dry|nostate|sf-error`.
+Включение:
 
 ```bash
 hookctl enable auto-continue
+hookctl enable auto-continue-sf
 ```
 
-Требует **node** (единственный не-bash хук репо). Тесты: `bash tests/test_auto_continue.sh`
-(20 кейсов: block/cap/TTL/interrupt/off-marker/string-content, HOME изолирован).
+Требует **node** (оба node-файла: `auto-continue.mjs` и `auto-continue-sf-child.mjs`).
+Тесты: `bash tests/test_auto_continue.sh` (30 проверок: block/cap/TTL/interrupt/off-marker/
+string-content/quote-in-tool_result/однострочный транскрипт + sf dry-cap-off-hasinput,
+HOME изолирован).
 
 ## Конвенция permission-паттернов (Правило 2 из issue #4)
 
@@ -341,6 +346,7 @@ claude-tools/
 │   ├── git-branch-guard.sh
 │   ├── one-command-at-a-time.sh   # «одна команда за раз»
 │   ├── auto-continue.mjs          # авто-продолжение после обрыва стрима (node, Stop)
+│   ├── auto-continue-common.mjs   # общий carrier/reader для обеих веток
 │   ├── auto-continue-sf.sh        # StopFailure launcher -> detached ребёнок
 │   └── auto-continue-sf-child.mjs # верификация хвоста + ao send --steer (node)
 ├── tests/

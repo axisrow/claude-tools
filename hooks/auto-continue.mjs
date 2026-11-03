@@ -36,73 +36,23 @@
 // Reference impl: claude-devtools/scripts/turn-budget-hook.mjs (fail-open
 // main, transcript reading, marker-file kill switch). Registry: "auto-continue".
 
-import {
-  appendFileSync,
-  closeSync,
-  existsSync,
-  fstatSync,
-  mkdirSync,
-  openSync,
-  readFileSync,
-  readSync,
-  writeFileSync,
-} from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
-const INCOMPLETE_SUFFIX = 'The response above may be incomplete.';
-// how Claude Code writes a user Esc-interrupt (seen in corpus transcripts)
-const INTERRUPT_MARKER = '[Request interrupted';
+import { INTERRUPT_MARKER, isCut, readTailLines } from './auto-continue-common.mjs';
+
 // raw-JSON gate: only assistant lines can matter, skip parsing everything else
 const ASSISTANT_GATE = '"type":"assistant"';
+// sidechain lines pass the assistant gate but are never main-chain — drop
+// before parse on the raw line (compact-JSON assumption, same as the gate)
+const SIDECRAFT_GATE = '"isSidechain":true';
 // ponytail: calibration knobs, not config — 3 blocked rounds per 10 min;
 // raise TTL only if real incidents outlive it
 const MAX_ROUNDS = 3;
 const BUDGET_TTL_MS = 10 * 60_000;
-// single bounded tail read; ceiling: a cut buried under more tail bookkeeping
-// than this is missed (fail-open) — real cut tails are a few lines
-const TAIL_BYTES = 1 << 20;
 const MAX_WALK_LINES = 500;
 const SESSION_RE = /^[\w-]+$/;
-
-/** Last <=TAIL_BYTES bytes of the file, lines newest-first. The oldest
- * (possibly torn mid-UTF-8) fragment is dropped; short reads are looped. */
-function readTailLines(path) {
-  const fd = openSync(path, 'r');
-  try {
-    const size = fstatSync(fd).size;
-    const want = Math.min(size, TAIL_BYTES);
-    const buf = Buffer.alloc(want);
-    let read = 0;
-    while (read < want) {
-      const n = readSync(fd, buf, read, want - read, size - want + read);
-      if (n <= 0) break;
-      read += n;
-    }
-    const parts = buf.toString('utf8', 0, read).split('\n');
-    parts.shift();
-    return parts.filter(Boolean).reverse();
-  } finally {
-    closeSync(fd);
-  }
-}
-
-function contentText(m) {
-  const c = m.message?.content;
-  if (typeof c === 'string') return c;
-  if (!Array.isArray(c)) return '';
-  // join without separator: a suffix straddling two blocks must still match
-  return c.map((b) => (typeof b?.text === 'string' ? b.text : '')).join('');
-}
-
-function isCut(m) {
-  return (
-    m.type === 'assistant' &&
-    m.isSidechain !== true &&
-    m.message?.model === '<synthetic>' &&
-    contentText(m).includes(INCOMPLETE_SUFFIX)
-  );
-}
 
 /** Newest-first scan: trailing synthetic-cut series length plus whether the
  * tail carries a user-interrupt marker (explicit stop intent wins). */
@@ -111,12 +61,21 @@ function scanTail(linesNewestFirst) {
   let seen = 0;
   let interrupted = false;
   for (const line of linesNewestFirst) {
-    // interrupt marker suppresses only while newer than any cut seen: an Esc
-    // that PRE-dates the cut (tool-use deny, quoted marker text in a session
-    // reading fixtures) must not silence a later real cut
-    if (cuts === 0 && line.includes(INTERRUPT_MARKER)) interrupted = true;
+    // interrupt marker suppresses only while newer than any cut seen AND only
+    // on a user prompt line: an Esc that PRE-dates the cut, a tool-use deny,
+    // or a tool_result/assistant text merely quoting the marker (sessions
+    // editing fixtures with this literal) must not silence a real cut
+    if (
+      cuts === 0 &&
+      line.includes(INTERRUPT_MARKER) &&
+      line.includes('"type":"user"') &&
+      !line.includes('"tool_result"')
+    ) {
+      interrupted = true;
+    }
     if (++seen >= MAX_WALK_LINES) break;
     if (!line.includes(ASSISTANT_GATE)) continue;
+    if (line.includes(SIDECRAFT_GATE)) continue;
     let m;
     try {
       m = JSON.parse(line);
@@ -177,13 +136,13 @@ function main() {
   if (typeof tp !== 'string') return;
   const session =
     typeof hook.session_id === 'string' && SESSION_RE.test(hook.session_id) ? hook.session_id : null;
+  // no usable session id -> cannot own a budget -> do not block
+  if (!session) return;
+  // cheap kill switch first: a disabled session pays one stat, not the scan
+  if (existsSync(offMarkerPath(session))) return;
 
   const { cuts, interrupted } = scanTail(readTailLines(tp));
   if (cuts === 0 || interrupted) return; // normal stop or explicit user stop
-  if (session && existsSync(offMarkerPath(session))) return; // per-session kill switch
-
-  // no usable session id -> cannot own a budget -> do not block
-  if (!session) return;
   const rounds = readRounds(session);
   const kind = rounds >= MAX_ROUNDS ? 'cap' : 'block';
   if (kind === 'block') {

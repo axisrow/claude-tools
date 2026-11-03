@@ -27,18 +27,19 @@ claude-tools#2 → anthropics/claude-code #3361 / #10600 / #79056. При доб
 bash install.sh            # проверит jq, chmod +x, symlink ~/bin/hookctl, включит git-branch-guard
 ```
 
-Зависимости: **`jq`** (нужен и `hookctl`, и bash-хукам) и **`node`** (нужен
-`hooks/auto-continue.mjs` — единственный не-bash хук). Без jq `install.sh` падает, а
+Зависимости: **`jq`** (нужен и `hookctl`, и bash-хукам) и **`node`** (нужен node-хукам
+`hooks/auto-continue.mjs` и `hooks/auto-continue-sf-child.mjs`). Без jq `install.sh` падает, а
 `git-branch-guard.sh` тихо `exit 0` (лучше пропустить, чем крашнуть сессию). Без node
-auto-continue не запускается (install.sh предупреждает).
+auto-continue-хуки не запускаются (install.sh предупреждает).
 
 `install.sh` правит боевой `~/.claude/settings.json` только через `hookctl enable` (с
 бэкапом `.bak`) — никогда не правь `settings.json` вручную.
 
 ## Команды разработки
 
-Это bash + jq-проект (плюс один node-хук, `hooks/auto-continue.mjs`) без сборки/линта в
-привычном смысле. Проверка после правок:
+Это bash + jq-проект (плюс node-хуки auto-continue: `hooks/auto-continue.mjs`,
+`hooks/auto-continue-sf-child.mjs`, общий модуль `hooks/auto-continue-common.mjs`) без
+сборки/линта в привычном смысле. Проверка после правок:
 
 ```bash
 hookctl list                                              # реестр: id, event, enabled

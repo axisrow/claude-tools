@@ -56,6 +56,8 @@ BIG_TOOL_RESULT='{"isSidechain":false,"type":"user","isMeta":true,"uuid":"u6","m
 BOOKKEEPING='{"type":"system","uuid":"s1","subtype":"turn_duration"}'
 USER_PROMPT='{"isSidechain":false,"type":"user","isMeta":false,"uuid":"u7","message":{"role":"user","content":"do the thing"}}'
 INTERRUPT='{"isSidechain":false,"type":"user","isMeta":true,"uuid":"u8","message":{"role":"user","content":"[Request interrupted by user]"}}'
+QUOTE_TOOLRESULT='{"isSidechain":false,"type":"user","isMeta":true,"uuid":"q1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tv9","is_error":false,"content":"[Request interrupted by user] appears in tool output"}]}}'
+IMG_PROMPT='{"isSidechain":false,"type":"user","isMeta":false,"uuid":"u9","message":{"role":"user","content":[{"type":"image","source":{"type":"base64"}},{"type":"text","text":"go on"}]}}'
 
 # 1. один cut в хвосте -> block, раунд записан в state
 fixture "$WORK/t1.jsonl" "$USER_PROMPT" "$CUT" "$BOOKKEEPING"
@@ -135,6 +137,21 @@ fixture "$WORK/t12.jsonl" "$USER_PROMPT" "$BIG_TOOL_RESULT" "$CUT"
 STDIN='{"hook_event_name":"Stop","transcript_path":"'"$WORK"'/t12.jsonl","session_id":"s12"}'
 expect_block "12: walk skips non-assistant lines"
 
+# 12b. marker старше cut -> НЕ гасит блокировку (Esc до обрыва)
+fixture "$WORK/t12b.jsonl" "$USER_PROMPT" "$INTERRUPT" "$CUT"
+STDIN='{"hook_event_name":"Stop","transcript_path":"'"$WORK"'/t12b.jsonl","session_id":"s12bold0"}'
+expect_block "12b: interrupt older than cut still blocks"
+
+# 12c. цитата маркера в tool_result -> НЕ гасит блокировку
+fixture "$WORK/t12c.jsonl" "$USER_PROMPT" "$CUT" "$QUOTE_TOOLRESULT"
+STDIN='{"hook_event_name":"Stop","transcript_path":"'"$WORK"'/t12c.jsonl","session_id":"s12quote"}'
+expect_block "12c: marker quoted in tool_result still blocks"
+
+# 12d. транскрипт из одной cut-строки (малый файл: shift не роняет её) -> block
+fixture "$WORK/t12d.jsonl" "$CUT"
+STDIN='{"hook_event_name":"Stop","transcript_path":"'"$WORK"'/t12d.jsonl","session_id":"s12one00"}'
+expect_block "12d: single-line transcript blocks"
+
 # --- StopFailure-ветка (sf): launcher + detached ребёнок в dry-run ----------
 SF_HOOK="$(dirname "$HOOK")/auto-continue-sf.sh"
 LOG="$WORK/.claude/claude-autocontinue.log"
@@ -209,6 +226,29 @@ if await_log "kind=sf-cap session=sfcap000"; then
 else
   FAIL=$((FAIL + 1))
   echo "FAIL(sf): 17: cap not honored"
+fi
+
+# 18. sf: off-маркер сессии -> sf-off, steer'а нет
+fixture "$WORK/t18.jsonl" "$USER_PROMPT" "$CUT"
+: > "$WORK/.claude/claude-autocontinue-off/sfoffmar"
+STDIN='{"hook_event_name":"StopFailure","transcript_path":"'"$WORK"'/t18.jsonl","session_id":"sfoffmar","cwd":"'"$WORK"'/fakeworktree"}'
+printf '%s' "$STDIN" | bash "$SF_HOOK"
+if await_log "kind=sf-off session=sfoffmar"; then
+  PASS=$((PASS + 1))
+else
+  FAIL=$((FAIL + 1))
+  echo "FAIL(sf): 18: off-marker not honored"
+fi
+
+# 19. sf: массивный (картинка) промпт новее cut -> sf-hasinput
+fixture "$WORK/t19.jsonl" "$USER_PROMPT" "$CUT" "$IMG_PROMPT"
+STDIN='{"hook_event_name":"StopFailure","transcript_path":"'"$WORK"'/t19.jsonl","session_id":"sfimg001","cwd":"'"$WORK"'/fakeworktree"}'
+printf '%s' "$STDIN" | bash "$SF_HOOK"
+if await_log "kind=sf-hasinput session=sfimg001"; then
+  PASS=$((PASS + 1))
+else
+  FAIL=$((FAIL + 1))
+  echo "FAIL(sf): 19: array-content input not detected"
 fi
 
 echo
