@@ -129,11 +129,14 @@ Upstream-боль не починена: [anthropics/claude-code#105804](https:/
 `StopFailure`, но его вывод игнорируется, а процесс убивают за ~10–50 мс
 ([#101420](https://github.com/anthropics/claude-code/issues/101420)). Поэтому хук —
 bash-launcher, который за эти миллисекунды спавнит detached-ребёнка (perl-setsid уводит
-из process group). Ребёнок через 12 с верифицирует: сессия всё ещё стоит на cut-семействе
-и никто не подал новый ввод → шлёт воркеру `ao send --message "Continue task" --steer`
+из process group). Ребёнок через 12 с верифицирует: сессия всё ещё стоит на cut-семействе,
+нового ввода не было, бюджет не исчерпан → шлёт воркеру `ao send --message "Continue task" --steer`
 (AO-сессия = `basename(cwd)`; `--client-message-id autocont-<cutUuid>` дедуплицирует
-повторы). Не-AO директории, чужие ошибки (429/ECONNRESET) и не-семейные тексты — skip.
-Dry-run: `AUTOCONTINUE_DRY_RUN=1`.
+повторы). **Бюджет общий со Stop-веткой** (3 раунда / 10 мин, state-файл) — цикл
+steer'ов на flappy-провайдере ограничен в обеих ветках. Steer уходит только idle
+AO-воркеру из `~/.ao/data/worktrees/` (занятый воркер = чужая сессия, не наша
+застрявшая). Не-AO директории, чужие ошибки (429/ECONNRESET) и не-семейные тексты —
+skip. Dry-run: `AUTOCONTINUE_DRY_RUN=1`.
 
 **Отпускает** (silent allow): обычная остановка; Esc-интерп `[Request interrupted …]` в хвосте;
 per-session kill switch — `mkdir -p ~/.claude/claude-autocontinue-off && : > ~/.claude/claude-autocontinue-off/<session-id>`;

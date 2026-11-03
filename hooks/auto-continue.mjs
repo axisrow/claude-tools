@@ -111,7 +111,10 @@ function scanTail(linesNewestFirst) {
   let seen = 0;
   let interrupted = false;
   for (const line of linesNewestFirst) {
-    if (line.includes(INTERRUPT_MARKER)) interrupted = true;
+    // interrupt marker suppresses only while newer than any cut seen: an Esc
+    // that PRE-dates the cut (tool-use deny, quoted marker text in a session
+    // reading fixtures) must not silence a later real cut
+    if (cuts === 0 && line.includes(INTERRUPT_MARKER)) interrupted = true;
     if (++seen >= MAX_WALK_LINES) break;
     if (!line.includes(ASSISTANT_GATE)) continue;
     let m;

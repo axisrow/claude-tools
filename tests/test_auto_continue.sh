@@ -140,6 +140,7 @@ SF_HOOK="$(dirname "$HOOK")/auto-continue-sf.sh"
 LOG="$WORK/.claude/claude-autocontinue.log"
 export AUTOCONTINUE_DRY_RUN=1
 export AUTOCONTINUE_CONFIRM_MS=300
+export AUTOCONTINUE_AO_DIR="$WORK"
 
 # ожидание записи от detached-ребёнка (до ~4 c)
 await_log() {
@@ -195,6 +196,19 @@ if grep -qE "session=sfnope01" "$LOG" 2>/dev/null; then
   echo "FAIL(sf): 16: child spawned on wrong event"
 else
   PASS=$((PASS + 1))
+fi
+
+# 17. sf-кап: бюджет сессии исчерпан -> sf-cap, steer'а нет
+fixture "$WORK/t17.jsonl" "$USER_PROMPT" "$CUT" "$BOOKKEEPING"
+mkdir -p "$WORK/.claude/claude-autocontinue-state"
+printf '{"count":3,"ts":%s}' "$(( $(date +%s) * 1000 ))" > "$WORK/.claude/claude-autocontinue-state/sfcap000.json"
+STDIN='{"hook_event_name":"StopFailure","transcript_path":"'"$WORK"'/t17.jsonl","session_id":"sfcap000","cwd":"'"$WORK"'/fakeworktree"}'
+printf '%s' "$STDIN" | bash "$SF_HOOK"
+if await_log "kind=sf-cap session=sfcap000"; then
+  PASS=$((PASS + 1))
+else
+  FAIL=$((FAIL + 1))
+  echo "FAIL(sf): 17: cap not honored"
 fi
 
 echo
