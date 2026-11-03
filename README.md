@@ -120,6 +120,21 @@ Upstream-боль не починена: [anthropics/claude-code#105804](https:/
 12 из 17 пар соседних cut'ов) — сбрасывает любую строковую серию. Стейт — единственный
 владелец счётчика: блок, который не удалось записать, не доставляется.
 
+**Stop-ветка пока не срабатывает на обрывах**: с ~CC 2.1.235 Stop на API-error-терминациях
+не файрится вовсе (регрессия [anthropics/claude-code#87972](https://github.com/anthropics/claude-code/issues/87972),
+подтверждена эмпирически 2026-11-03: на живых нормальных остановках хук вызывается, на
+обрывах — нет). Заработает сам, когда Anthropic починит.
+
+**StopFailure-ветка (auto-continue-sf)** — работает сегодня: на API-error CC файрит
+`StopFailure`, но его вывод игнорируется, а процесс убивают за ~10–50 мс
+([#101420](https://github.com/anthropics/claude-code/issues/101420)). Поэтому хук —
+bash-launcher, который за эти миллисекунды спавнит detached-ребёнка (perl-setsid уводит
+из process group). Ребёнок через 12 с верифицирует: сессия всё ещё стоит на cut-семействе
+и никто не подал новый ввод → шлёт воркеру `ao send --message "Continue task" --steer`
+(AO-сессия = `basename(cwd)`; `--client-message-id autocont-<cutUuid>` дедуплицирует
+повторы). Не-AO директории, чужие ошибки (429/ECONNRESET) и не-семейные тексты — skip.
+Dry-run: `AUTOCONTINUE_DRY_RUN=1`.
+
 **Отпускает** (silent allow): обычная остановка; Esc-интерп `[Request interrupted …]` в хвосте;
 per-session kill switch — `mkdir -p ~/.claude/claude-autocontinue-off && : > ~/.claude/claude-autocontinue-off/<session-id>`;
 другие API-ошибки (429/ECONNRESET — ретрай не всегда лечит); любые свои ошибки (fail-open).
@@ -322,7 +337,9 @@ claude-tools/
 ├── hooks/
 │   ├── git-branch-guard.sh
 │   ├── one-command-at-a-time.sh   # «одна команда за раз»
-│   └── auto-continue.mjs          # авто-продолжение после обрыва стрима (node)
+│   ├── auto-continue.mjs          # авто-продолжение после обрыва стрима (node, Stop)
+│   ├── auto-continue-sf.sh        # StopFailure launcher -> detached ребёнок
+│   └── auto-continue-sf-child.mjs # верификация хвоста + ao send --steer (node)
 ├── tests/
 │   ├── test_timeout_fix.sh
 │   ├── test_permission_mode.sh

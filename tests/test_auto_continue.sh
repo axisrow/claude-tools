@@ -135,6 +135,68 @@ fixture "$WORK/t12.jsonl" "$USER_PROMPT" "$BIG_TOOL_RESULT" "$CUT"
 STDIN='{"hook_event_name":"Stop","transcript_path":"'"$WORK"'/t12.jsonl","session_id":"s12"}'
 expect_block "12: walk skips non-assistant lines"
 
+# --- StopFailure-ветка (sf): launcher + detached ребёнок в dry-run ----------
+SF_HOOK="$(dirname "$HOOK")/auto-continue-sf.sh"
+LOG="$WORK/.claude/claude-autocontinue.log"
+export AUTOCONTINUE_DRY_RUN=1
+export AUTOCONTINUE_CONFIRM_MS=300
+
+# ожидание записи от detached-ребёнка (до ~4 c)
+await_log() {
+  local i
+  for i in $(seq 1 40); do
+    grep -qE "$1" "$LOG" 2>/dev/null && return 0
+    sleep 0.1
+  done
+  return 1
+}
+
+mkdir -p "$WORK/fakeworktree"
+
+# 13. StopFailure + cut-хвост -> ребёнок логирует sf-dry с маппингом ao=<basename cwd>
+fixture "$WORK/t13.jsonl" "$USER_PROMPT" "$CUT" "$BOOKKEEPING"
+STDIN='{"hook_event_name":"StopFailure","transcript_path":"'"$WORK"'/t13.jsonl","session_id":"sfsessio-long-id","cwd":"'"$WORK"'/fakeworktree"}'
+printf '%s' "$STDIN" | bash "$SF_HOOK"
+if await_log "kind=sf-dry session=sfsessio ao=fakeworktree cutUuid=u1"; then
+  PASS=$((PASS + 1))
+else
+  FAIL=$((FAIL + 1))
+  echo "FAIL(sf): 13: dry ao-send not logged"
+fi
+
+# 14. newest assistant не из семьи -> sf-notfamily
+fixture "$WORK/t14.jsonl" "$USER_PROMPT" "$REAL"
+STDIN='{"hook_event_name":"StopFailure","transcript_path":"'"$WORK"'/t14.jsonl","session_id":"sfnofam1","cwd":"'"$WORK"'/fakeworktree"}'
+printf '%s' "$STDIN" | bash "$SF_HOOK"
+if await_log "kind=sf-notfamily session=sfnofam1"; then
+  PASS=$((PASS + 1))
+else
+  FAIL=$((FAIL + 1))
+  echo "FAIL(sf): 14: notfamily not logged"
+fi
+
+# 15. свежий промпт новее cut -> sf-hasinput (не дублируем steer)
+fixture "$WORK/t15.jsonl" "$USER_PROMPT" "$CUT" "$USER_PROMPT"
+STDIN='{"hook_event_name":"StopFailure","transcript_path":"'"$WORK"'/t15.jsonl","session_id":"sfhasin1","cwd":"'"$WORK"'/fakeworktree"}'
+printf '%s' "$STDIN" | bash "$SF_HOOK"
+if await_log "kind=sf-hasinput session=sfhasin1"; then
+  PASS=$((PASS + 1))
+else
+  FAIL=$((FAIL + 1))
+  echo "FAIL(sf): 15: hasinput not logged"
+fi
+
+# 16. чужое событие -> ребёнок не спавнится, записи нет
+STDIN='{"hook_event_name":"PreToolUse","transcript_path":"'"$WORK"'/t13.jsonl","session_id":"sfnope01","cwd":"'"$WORK"'/fakeworktree"}'
+printf '%s' "$STDIN" | bash "$SF_HOOK"
+sleep 0.6
+if grep -qE "session=sfnope01" "$LOG" 2>/dev/null; then
+  FAIL=$((FAIL + 1))
+  echo "FAIL(sf): 16: child spawned on wrong event"
+else
+  PASS=$((PASS + 1))
+fi
+
 echo
 echo "pass=$PASS fail=$FAIL"
 [ "$FAIL" -eq 0 ]

@@ -35,6 +35,14 @@
       "timeout": 5,
       "statusMessage": "Auto-continue after incomplete response",
       "enabled": true
+    },
+    {
+      "id": "auto-continue-sf",
+      "event": "StopFailure",
+      "command": "hooks/auto-continue-sf.sh",
+      "timeout": 5,
+      "statusMessage": "Auto-continue AO worker after API error",
+      "enabled": true
     }
   ]
 }
