@@ -11,6 +11,9 @@ CLAUDE.md не лечат — агент их игнорирует. Лечит *
   git/gh-операциями.
 - **`hooks/one-command-at-a-time.sh`** — PreToolUse-хук: спрашивает подтверждение перед compound-
   командами (`a && b`, `a; b`, `a || b`, `a | b`) — правило «одна bash-команда за раз». См. ниже.
+- **`hooks/auto-continue.mjs`** — Stop-хук (node): при обрыве стрима семейства
+  «API Error: … The response above may be incomplete.» автоматически продолжает работу
+  (block + «Continue task»), кап — 3 раунда за 10-минутный бюджет на сессию. См. ниже.
 - **`bin/hookctl`** — управление хуками в `~/.claude/settings.json` (реестр + мерж).
 - **`bin/timeout-fix`** — локальный фикс бага `timeout`/`gtimeout` на macOS (ставит coreutils,
   добавляет gnubin в PATH, поднимает `BASH_MAX_TIMEOUT_MS`). См. ниже.
@@ -97,6 +100,38 @@ false-positives. Первая цель расширения — heredoc (~1% к�
 исключениями — переход на [`bashlex`](https://github.com/idank/bashlex) / [`mvdan/sh`](https://github.com/mvdan/sh).
 
 Тесты: `bash tests/test_one_command_at_a_time.sh` (22 кейса: ask/clean/ambiguous).
+
+## hooks/auto-continue — авто-продолжение после обрыва стрима
+
+Когда CC останавливается с «API Error: … The response above may be incomplete.»
+(stopped arriving / Connection lost / computer went to sleep — до 58% всех API-ошибок
+корпуса), сессия встаёт до ручного «continue». Хук на Stop читает хвост транскрипта:
+если новейшая main-chain assistant-строка — синтетический API error семейства
+(`model === '<synthetic>'` + суффикс), блокирует остановку с reason **«Continue task»** —
+CC подставляет его как инструкцию и продолжает.
+
+Upstream-боль не починена: [anthropics/claude-code#105804](https://github.com/anthropics/claude-code/issues/105804),
+[#104603](https://github.com/anthropics/claude-code/issues/104603), [#103058](https://github.com/anthropics/claude-code/issues/103058).
+См. [axisrow/claude-tools#24](https://github.com/axisrow/claude-tools/issues/24).
+
+**Кап**: 3 блока за 10-минутный бюджет на сессию (state `~/.claude/claude-autocontinue-state/<session>.json`;
+бюджет протухает — счётчик свежий). Нельзя считать раунды по строкам транскрипта: обрыв
+середине ответа оставляет реальную частичную assistant-строку над cut-строкой (корпус:
+12 из 17 пар соседних cut'ов) — сбрасывает любую строковую серию. Стейт — единственный
+владелец счётчика: блок, который не удалось записать, не доставляется.
+
+**Отпускает** (silent allow): обычная остановка; Esc-интерп `[Request interrupted …]` в хвосте;
+per-session kill switch — `mkdir -p ~/.claude/claude-autocontinue-off && : > ~/.claude/claude-autocontinue-off/<session-id>`;
+другие API-ошибки (429/ECONNRESET — ретрай не всегда лечит); любые свои ошибки (fail-open).
+
+Лог: `~/.claude/claude-autocontinue.log` (`kind=block|cap|nostate`). Включение:
+
+```bash
+hookctl enable auto-continue
+```
+
+Требует **node** (единственный не-bash хук репо). Тесты: `bash tests/test_auto_continue.sh`
+(20 кейсов: block/cap/TTL/interrupt/off-marker/string-content, HOME изолирован).
 
 ## Конвенция permission-паттернов (Правило 2 из issue #4)
 
@@ -286,12 +321,14 @@ claude-tools/
 ├── permissions-audit.conf   # конфиг: опасные команды + scoped + deprecated-regex
 ├── hooks/
 │   ├── git-branch-guard.sh
-│   └── one-command-at-a-time.sh   # «одна команда за раз»
+│   ├── one-command-at-a-time.sh   # «одна команда за раз»
+│   └── auto-continue.mjs          # авто-продолжение после обрыва стрима (node)
 ├── tests/
 │   ├── test_timeout_fix.sh
 │   ├── test_permission_mode.sh
 │   ├── test_permissions_audit.sh
-│   └── test_one_command_at_a_time.sh
+│   ├── test_one_command_at_a_time.sh
+│   └── test_auto_continue.sh
 └── skills/
     ├── hooks/SKILL.md             # /hooks
     ├── fix/SKILL.md               # /fix

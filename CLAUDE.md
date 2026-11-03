@@ -27,15 +27,18 @@ claude-tools#2 → anthropics/claude-code #3361 / #10600 / #79056. При доб
 bash install.sh            # проверит jq, chmod +x, symlink ~/bin/hookctl, включит git-branch-guard
 ```
 
-Зависимость единственная: **`jq`** (нужен и `hookctl`, и хукам). Без него `install.sh`
-падает, а `git-branch-guard.sh` тихо `exit 0` (лучше пропустить, чем крашнуть сессию).
+Зависимости: **`jq`** (нужен и `hookctl`, и bash-хукам) и **`node`** (нужен
+`hooks/auto-continue.mjs` — единственный не-bash хук). Без jq `install.sh` падает, а
+`git-branch-guard.sh` тихо `exit 0` (лучше пропустить, чем крашнуть сессию). Без node
+auto-continue не запускается (install.sh предупреждает).
 
 `install.sh` правит боевой `~/.claude/settings.json` только через `hookctl enable` (с
 бэкапом `.bak`) — никогда не правь `settings.json` вручную.
 
 ## Команды разработки
 
-Это bash + jq-проект без сборки/тестов/линта в привычном смысле. Проверка после правок:
+Это bash + jq-проект (плюс один node-хук, `hooks/auto-continue.mjs`) без сборки/линта в
+привычном смысле. Проверка после правок:
 
 ```bash
 hookctl list                                              # реестр: id, event, enabled
@@ -68,6 +71,7 @@ bash tests/test_timeout_fix.sh                  # red-green тесты bin/timeo
 bash tests/test_permission_mode.sh              # red-green тесты bin/permission-mode (на tmp-копии settings.json)
 bash tests/test_permissions_audit.sh            # red-green тесты bin/permissions-audit (audit/cleanup, tmp-копия settings.json)
 bash tests/test_one_command_at_a_time.sh        # red-green тесты хука compound-команд (через jq-pipe)
+bash tests/test_auto_continue.sh                # red-green тесты Stop-хука auto-continue (HOME изолирован)
 ```
 
 `test_timeout_fix.sh` / `test_permission_mode.sh` гоняют CLI на tmp-копии `settings.json`
