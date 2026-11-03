@@ -16,7 +16,9 @@ parent/child через GraphQL `addSubIssue`, не просто чек-лист
 GitHub Issues API через `gh`: REST для create/label/comment, GraphQL для
 native-привязки.
 
-Скил глобальный. Драйвер: `~/.claude/skills/issue-planner/subissue.sh`.
+Скил глобальный. Драйвер `subissue.sh` лежит:
+- при symlink-установке (install.sh): `~/.claude/skills/issue-planner/subissue.sh` — этот путь используется в примерах ниже;
+- при установке как плагина (`/plugin install`): `${CLAUDE_PLUGIN_ROOT}/skills/issue-planner/subissue.sh` — подставляй его в примеры вместо symlink-пути.
 В примерах ниже `OWNER REPO` — это `axisrow tg_content_factory`; для другого
 проекта подставить его owner/repo (или `gh repo view --json owner,name`).
 

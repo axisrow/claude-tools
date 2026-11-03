@@ -1,0 +1,14 @@
+{
+  "name": "axisrow",
+  "owner": {
+    "name": "axisrow"
+  },
+  "description": "Скиллы из репо claude-tools: /fix, /hooks, /issue-planner, /project-trust и другие",
+  "plugins": [
+    {
+      "name": "tools",
+      "source": "./",
+      "description": "Все скиллы claude-tools: fix, hooks, issue-planner, project-trust, test-categories, cleanup-procs, fewer-permission-prompts. Скиллы доступны как /tools:<имя>."
+    }
+  ]
+}

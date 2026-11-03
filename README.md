@@ -30,6 +30,14 @@ CLAUDE.md не лечат — агент их игнорирует. Лечит *
 
 ## Установка
 
+Как плагин (все скиллы разом, доступны как `/tools:<имя>`):
+
+```
+/plugin install tools --marketplace axisrow/claude-tools
+```
+
+Классически, через symlink (хуки + CLI-утилиты + скиллы):
+
 ```bash
 cd /path/to/claude-tools   # куда клонирован репо
 bash install.sh
