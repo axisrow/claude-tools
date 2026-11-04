@@ -136,7 +136,9 @@ CC в хуки; фрейм `{"type":"auth",…}` + `{"type":"user","message":{"r
 Own-child сообщение верифицируется CC, и idle-сессия **стартует новый ход** с «Continue task»
 — официальный механизм cross-session messaging, покрывает все сессии и провайдеры без
 исключений. `ao send` не используется: AO-воркеры в tui-режиме отвечают
-SESSION_MODE_MISMATCH (чат-конверсации нет). **Бюджет общий со Stop-веткой** (3 раунда /
+SESSION_MODE_MISMATCH (чат-конверсации нет). Сессии под tmux (`$TMUX`) — владение
+[claude-auto-retry](https://github.com/cheapestinference/claude-auto-retry) (ставится
+отдельно, монитор + send-keys): наш хук в них молчит — один владелец на сессию. **Бюджет общий со Stop-веткой** (3 раунда /
 10 мин, state-файл) — цикл продолжений на flappy-провайдере ограничен в обеих ветках.
 Чужие ошибки (429/ECONNRESET) и не-семейные тексты — skip. Dry-run: `AUTOCONTINUE_DRY_RUN=1`.
 
