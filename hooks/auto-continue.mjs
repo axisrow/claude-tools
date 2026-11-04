@@ -138,6 +138,9 @@ function main() {
     typeof hook.session_id === 'string' && SESSION_RE.test(hook.session_id) ? hook.session_id : null;
   // no usable session id -> cannot own a budget -> do not block
   if (!session) return;
+  // tmux sessions are owned by claude-auto-retry (its monitor watches the pane
+  // and delivers continue itself) — one owner per session, no double-continue
+  if (process.env.TMUX) return;
   // cheap kill switch first: a disabled session pays one stat, not the scan
   if (existsSync(offMarkerPath(session))) return;
 

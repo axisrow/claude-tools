@@ -45,6 +45,9 @@ const hook = (() => {
   }
 })();
 if (hook.hook_event_name !== 'StopFailure') process.exit(0);
+// tmux sessions are owned by claude-auto-retry (it watches the pane and sends
+// continue itself) — our socket post would double-continue those
+if (process.env.TMUX) process.exit(0);
 const transcriptPath = hook.transcript_path;
 const sessionId = typeof hook.session_id === 'string' && SESSION_RE.test(hook.session_id) ? hook.session_id : null;
 // no usable session id -> no budget ownership -> no steer (fail-safe)

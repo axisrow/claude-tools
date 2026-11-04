@@ -152,6 +152,10 @@ fixture "$WORK/t12d.jsonl" "$CUT"
 STDIN='{"hook_event_name":"Stop","transcript_path":"'"$WORK"'/t12d.jsonl","session_id":"s12one00"}'
 expect_block "12d: single-line transcript blocks"
 
+# 12e. сессия под tmux -> владелец claude-auto-retry, наш хук молчит
+STDIN='{"hook_event_name":"Stop","transcript_path":"'"$WORK"'/t1.jsonl","session_id":"s12tmux0"}'
+TMUX=,unused expect_allow "12e: tmux session owned by auto-retry"
+
 # --- StopFailure-ветка (sf): launcher + detached ребёнок в dry-run ----------
 SF_HOOK="$(dirname "$HOOK")/auto-continue-sf.sh"
 LOG="$WORK/.claude/claude-autocontinue.log"
@@ -294,6 +298,19 @@ else
 fi
 kill "$SRV_PID" 2>/dev/null
 wait "$SRV_PID" 2>/dev/null
+
+# 20b-check: (см. ниже)
+
+# 21. sf: сессия под tmux -> владелец claude-auto-retry, ребёнок не стартует
+STDIN='{"hook_event_name":"StopFailure","transcript_path":"'"$WORK"'/t13.jsonl","session_id":"sftmux01","cwd":"'"$WORK"'/fakeworktree"}'
+TMUX=,unused printf '%s' "$STDIN" | TMUX=,unused bash "$SF_HOOK"
+sleep 0.6
+if grep -qE "session=sftmux01" "$LOG" 2>/dev/null; then
+  FAIL=$((FAIL + 1))
+  echo "FAIL(sf): 21: child ran in tmux-owned session"
+else
+  PASS=$((PASS + 1))
+fi
 
 echo
 echo "pass=$PASS fail=$FAIL"
