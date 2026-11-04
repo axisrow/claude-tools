@@ -130,20 +130,22 @@ Upstream-боль не починена: [anthropics/claude-code#105804](https:/
 ([#101420](https://github.com/anthropics/claude-code/issues/101420)). Поэтому хук —
 bash-launcher, который за эти миллисекунды спавнит detached-ребёнка (perl-setsid уводит
 из process group). Ребёнок через 12 с верифицирует: сессия всё ещё стоит на cut-семействе,
-нового ввода не было, бюджет не исчерпан → шлёт воркеру `ao send --message "Continue task" --steer`
-(AO-сессия = `basename(cwd)`; `--client-message-id autocont-<cutUuid>` дедуплицирует
-повторы). **Бюджет общий со Stop-веткой** (3 раунда / 10 мин, state-файл) — цикл
-steer'ов на flappy-провайдере ограничен в обеих ветках. Steer уходит только idle
-AO-воркеру из `~/.ao/data/worktrees/` (занятый воркер = чужая сессия, не наша
-застрявшая). Не-AO директории, чужие ошибки (429/ECONNRESET) и не-семейные тексты —
-skip. Dry-run: `AUTOCONTINUE_DRY_RUN=1`.
+нового ввода не было, бюджет не исчерпан → доставляет «Continue task» в **нативный
+inbox-сокет этой же сессии** (`CLAUDE_CODE_MESSAGING_SOCKET` + токен, оба экспортируются
+CC в хуки; фрейм `{"type":"auth",…}` + `{"type":"user","message":{"role":"user","content":…}}`).
+Own-child сообщение верифицируется CC, и idle-сессия **стартует новый ход** с «Continue task»
+— официальный механизм cross-session messaging, покрывает все сессии и провайдеры без
+исключений. `ao send` не используется: AO-воркеры в tui-режиме отвечают
+SESSION_MODE_MISMATCH (чат-конверсации нет). **Бюджет общий со Stop-веткой** (3 раунда /
+10 мин, state-файл) — цикл продолжений на flappy-провайдере ограничен в обеих ветках.
+Чужие ошибки (429/ECONNRESET) и не-семейные тексты — skip. Dry-run: `AUTOCONTINUE_DRY_RUN=1`.
 
 **Отпускает** (silent allow): обычная остановка; Esc-интерп `[Request interrupted …]` в хвосте;
 per-session kill switch — `mkdir -p ~/.claude/claude-autocontinue-off && : > ~/.claude/claude-autocontinue-off/<session-id>`;
 другие API-ошибки (429/ECONNRESET — ретрай не всегда лечит); любые свои ошибки (fail-open).
 
 Лог: `~/.claude/claude-autocontinue.log` — Stop-ветка: `kind=block|cap|nostate`;
-sf-ветка: `kind=ao-send|sf-cap|sf-off|sf-hasinput|sf-notfamily|sf-noassistant|sf-nonao|sf-busy|sf-noao|sf-dry|nostate|sf-error`.
+sf-ветка: `kind=socket-send|socket-fail|sf-nosock|sf-cap|sf-off|sf-hasinput|sf-notfamily|sf-noassistant|sf-dry|nostate|sf-error`.
 Включение:
 
 ```bash
@@ -348,7 +350,7 @@ claude-tools/
 │   ├── auto-continue.mjs          # авто-продолжение после обрыва стрима (node, Stop)
 │   ├── auto-continue-common.mjs   # общий carrier/reader для обеих веток
 │   ├── auto-continue-sf.sh        # StopFailure launcher -> detached ребёнок
-│   └── auto-continue-sf-child.mjs # верификация хвоста + ao send --steer (node)
+│   └── auto-continue-sf-child.mjs # верификация хвоста + пост в inbox-сокет CC (node)
 ├── tests/
 │   ├── test_timeout_fix.sh
 │   ├── test_permission_mode.sh

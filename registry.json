@@ -41,7 +41,7 @@
       "event": "StopFailure",
       "command": "hooks/auto-continue-sf.sh",
       "timeout": 5,
-      "statusMessage": "Auto-continue AO worker after API error",
+      "statusMessage": "Auto-continue after API error (native inbox socket)",
       "enabled": true
     }
   ]
