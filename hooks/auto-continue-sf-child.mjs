@@ -45,9 +45,10 @@ const hook = (() => {
   }
 })();
 if (hook.hook_event_name !== 'StopFailure') process.exit(0);
-// tmux sessions are owned by claude-auto-retry (it watches the pane and sends
-// continue itself) — our socket post would double-continue those
-if (process.env.TMUX) process.exit(0);
+// tmux sessions: the cut family stays ours — auto-retry matches only
+// rate-limit/overload patterns, so an incomplete break in tmux had no owner
+// (gtoil 2026-11-05). socket-send reaches tmux sessions fine; limits stay
+// auto-retry's, triggers don't overlap.
 const transcriptPath = hook.transcript_path;
 const sessionId = typeof hook.session_id === 'string' && SESSION_RE.test(hook.session_id) ? hook.session_id : null;
 // no usable session id -> no budget ownership -> no steer (fail-safe)

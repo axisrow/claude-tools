@@ -152,9 +152,11 @@ fixture "$WORK/t12d.jsonl" "$CUT"
 STDIN='{"hook_event_name":"Stop","transcript_path":"'"$WORK"'/t12d.jsonl","session_id":"s12one00"}'
 expect_block "12d: single-line transcript blocks"
 
-# 12e. сессия под tmux -> владелец claude-auto-retry, наш хук молчит
+# 12e. сессия под tmux — семейство incomplete остаётся за хуком (вариант A):
+# auto-retry владеет лимитами/перегрузами; триггеры не пересекаются, и на
+# живом инциденте (gtoil 2026-11-05) без хука обрыв не продолжался вовсе
 STDIN='{"hook_event_name":"Stop","transcript_path":"'"$WORK"'/t1.jsonl","session_id":"s12tmux0"}'
-TMUX=,unused expect_allow "12e: tmux session owned by auto-retry"
+TMUX=,unused expect_block "12e: tmux session — hook owns the cut family"
 
 # --- StopFailure-ветка (sf): launcher + detached ребёнок в dry-run ----------
 SF_HOOK="$(dirname "$HOOK")/auto-continue-sf.sh"
@@ -301,15 +303,16 @@ wait "$SRV_PID" 2>/dev/null
 
 # 20b-check: (см. ниже)
 
-# 21. sf: сессия под tmux -> владелец claude-auto-retry, ребёнок не стартует
+# 21. sf: сессия под tmux — ребёнок работает (вариант A): доставка socket-send
+# в tmux-сессию валидна, а без нас обрыв не продолжал никто
 STDIN='{"hook_event_name":"StopFailure","transcript_path":"'"$WORK"'/t13.jsonl","session_id":"sftmux01","cwd":"'"$WORK"'/fakeworktree"}'
 TMUX=,unused printf '%s' "$STDIN" | TMUX=,unused bash "$SF_HOOK"
 sleep 0.6
 if grep -qE "session=sftmux01" "$LOG" 2>/dev/null; then
-  FAIL=$((FAIL + 1))
-  echo "FAIL(sf): 21: child ran in tmux-owned session"
-else
   PASS=$((PASS + 1))
+else
+  FAIL=$((FAIL + 1))
+  echo "FAIL(sf): 21: child skipped tmux-owned session — cut family unowned"
 fi
 
 echo
