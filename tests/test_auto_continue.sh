@@ -152,12 +152,17 @@ fixture "$WORK/t12d.jsonl" "$CUT"
 STDIN='{"hook_event_name":"Stop","transcript_path":"'"$WORK"'/t12d.jsonl","session_id":"s12one00"}'
 expect_block "12d: single-line transcript blocks"
 
+# 12e. сессия под tmux — семейство incomplete остаётся за хуком (вариант A):
+# auto-retry владеет лимитами/перегрузами; триггеры не пересекаются, и на
+# живом инциденте (gtoil 2026-11-05) без хука обрыв не продолжался вовсе
+STDIN='{"hook_event_name":"Stop","transcript_path":"'"$WORK"'/t1.jsonl","session_id":"s12tmux0"}'
+TMUX=,unused expect_block "12e: tmux session — hook owns the cut family"
+
 # --- StopFailure-ветка (sf): launcher + detached ребёнок в dry-run ----------
 SF_HOOK="$(dirname "$HOOK")/auto-continue-sf.sh"
 LOG="$WORK/.claude/claude-autocontinue.log"
 export AUTOCONTINUE_DRY_RUN=1
 export AUTOCONTINUE_CONFIRM_MS=300
-export AUTOCONTINUE_AO_DIR="$WORK"
 
 # ожидание записи от detached-ребёнка (до ~4 c)
 await_log() {
@@ -171,11 +176,11 @@ await_log() {
 
 mkdir -p "$WORK/fakeworktree"
 
-# 13. StopFailure + cut-хвост -> ребёнок логирует sf-dry с маппингом ao=<basename cwd>
+# 13. StopFailure + cut-хвост -> ребёнок логирует sf-dry (сокет не трогается в dry)
 fixture "$WORK/t13.jsonl" "$USER_PROMPT" "$CUT" "$BOOKKEEPING"
 STDIN='{"hook_event_name":"StopFailure","transcript_path":"'"$WORK"'/t13.jsonl","session_id":"sfsessio-long-id","cwd":"'"$WORK"'/fakeworktree"}'
 printf '%s' "$STDIN" | bash "$SF_HOOK"
-if await_log "kind=sf-dry session=sfsessio ao=fakeworktree cutUuid=u1"; then
+if await_log "kind=sf-dry session=sfsessio cutUuid=u1"; then
   PASS=$((PASS + 1))
 else
   FAIL=$((FAIL + 1))
@@ -249,6 +254,65 @@ if await_log "kind=sf-hasinput session=sfimg001"; then
 else
   FAIL=$((FAIL + 1))
   echo "FAIL(sf): 19: array-content input not detected"
+fi
+
+# 20. sf: живая доставка — child шлёт auth+message в fake inbox-сокет (не dry)
+fixture "$WORK/t20.jsonl" "$USER_PROMPT" "$CUT" "$BOOKKEEPING"
+printf '%s\n' \
+  "import net from 'node:net';" \
+  "import fs from 'node:fs';" \
+  "const out = process.env.FAKE_RECV;" \
+  "const s = net.createServer((c) => {" \
+  "  let b = '';" \
+  "  c.on('data', (d) => {" \
+  "    b += d;" \
+  "    let i;" \
+  "    while ((i = b.indexOf('\n')) >= 0) {" \
+  "      fs.appendFileSync(out, b.slice(0, i) + '\n');" \
+  "      b = b.slice(i + 1);" \
+  "    }" \
+  "  });" \
+  "});" \
+  "s.listen(process.env.FAKE_SOCK);" > "$WORK/fake-sock-server.mjs"
+rm -f "$WORK/fake.sock"
+FAKE_SOCK="$WORK/fake.sock" FAKE_RECV="$WORK/fake-recv.txt" node "$WORK/fake-sock-server.mjs" &
+SRV_PID=$!
+for i in $(seq 1 30); do [ -S "$WORK/fake.sock" ] && break; sleep 0.1; done
+# не dry + фейковый сокет: реальный код доставки без боя (настоящий сокет не трогается)
+printf '%s' '{"hook_event_name":"StopFailure","transcript_path":"'"$WORK"'/t20.jsonl","session_id":"sfsock01","cwd":"'"$WORK"'/fakeworktree"}' \
+  | env -u AUTOCONTINUE_DRY_RUN \
+      CLAUDE_CODE_MESSAGING_SOCKET="$WORK/fake.sock" \
+      CLAUDE_CODE_MESSAGING_TOKEN="testkey000000000000000000000000" \
+      bash "$SF_HOOK"
+if await_log "kind=socket-send session=sfsock01"; then
+  PASS=$((PASS + 1))
+else
+  FAIL=$((FAIL + 1))
+  echo "FAIL(sf): 20a: socket-send not logged"
+fi
+if grep -q '"type":"auth"' "$WORK/fake-recv.txt" 2>/dev/null \
+   && grep -q '"content":"Continue task"' "$WORK/fake-recv.txt" 2>/dev/null \
+   && grep -q '"role":"user"' "$WORK/fake-recv.txt" 2>/dev/null; then
+  PASS=$((PASS + 1))
+else
+  FAIL=$((FAIL + 1))
+  echo "FAIL(sf): 20b: fake socket did not receive auth+message frame"
+fi
+kill "$SRV_PID" 2>/dev/null
+wait "$SRV_PID" 2>/dev/null
+
+# 20b-check: (см. ниже)
+
+# 21. sf: сессия под tmux — ребёнок работает (вариант A): доставка socket-send
+# в tmux-сессию валидна, а без нас обрыв не продолжал никто
+STDIN='{"hook_event_name":"StopFailure","transcript_path":"'"$WORK"'/t13.jsonl","session_id":"sftmux01","cwd":"'"$WORK"'/fakeworktree"}'
+TMUX=,unused printf '%s' "$STDIN" | TMUX=,unused bash "$SF_HOOK"
+sleep 0.6
+if grep -qE "session=sftmux01" "$LOG" 2>/dev/null; then
+  PASS=$((PASS + 1))
+else
+  FAIL=$((FAIL + 1))
+  echo "FAIL(sf): 21: child skipped tmux-owned session — cut family unowned"
 fi
 
 echo

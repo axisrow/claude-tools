@@ -5,34 +5,36 @@
 // Pipeline: sleep -> verify the session is STILL stalled on the "API Error: ...
 // The response above may be incomplete." family (canonical carrier:
 // main-chain assistant, model '<synthetic>', cf. claude-devtools toolStats.ts)
-// and that nobody prompted it meanwhile -> steer the AO worker:
-//   ao send --session <basename(cwd)> --message "Continue task" --steer
-//           --client-message-id autocont-<cutUuid>
+// and that nobody prompted it meanwhile -> deliver "Continue task" into the
+// session's own CC inbox socket:
+//   $CLAUDE_CODE_MESSAGING_SOCKET (+ $CLAUDE_CODE_MESSAGING_TOKEN), both
+//   exported by Claude Code to hooks before any hook runs.
+// Frame (from the uds-messaging startup log inside the CC binary):
+//   {"type":"auth","token":"<token>"}
+//   {"type":"user","message":{"role":"user","content":"Continue task"}}
+// An own-child verified post lands as a user message; when the session is idle
+// (a stream cut leaves it idle), CC starts a new turn with it — the native
+// cross-session-messaging wake path, no external tools involved.
 //
 // Budget: the same 3-rounds/10-min state file as the Stop branch (shared
 // counter — when upstream fixes #87972 both channels draw on one budget). No
 // usable session id -> no budget -> no steer (fail-safe, like the Stop branch).
-// AO targeting: cwd must be an AO worktree and the session record must report
-// activity 'idle' — a stalled session is idle, so an active worker is somebody
-// else's (basename is not an exact join; ao exposes no transcript path).
-// Non-AO dirs and non-family failures (429/ECONNRESET) are skipped.
-// Dry-run: AUTOCONTINUE_DRY_RUN=1 -> log only, no ao call.
+// Non-family failures (429/ECONNRESET) are skipped; messaging off -> sf-nosock.
+// Dry-run: AUTOCONTINUE_DRY_RUN=1 -> log only, no socket.
 // claude-tools#24, anthropics/claude-code#87972.
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { basename } from 'node:path';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { connect } from 'node:net';
 import { homedir } from 'node:os';
 
 import { isCut, readTailLines } from './auto-continue-common.mjs';
 
+// ponytail: calibration knobs, not config — tests shorten the delay via env
 const STALL_CONFIRM_MS = Number(process.env.AUTOCONTINUE_CONFIRM_MS) || 12_000;
 const MAX_ROUNDS = 3;
 const BUDGET_TTL_MS = 10 * 60_000;
 const TAIL_BYTES = 1 << 18;
-const AO_TIMEOUT_MS = 10_000; // a wedged ao daemon must not leak the child
+const SOCKET_ACK_MS = 5000; // the inbox never acks; this only bounds the child's life
 const SESSION_RE = /^[\w-]+$/;
-// ponytail: AO-worktree prefix is fixed for this machine; env override is for tests
-const AO_DIR_MARKER = process.env.AUTOCONTINUE_AO_DIR ?? '/.ao/data/worktrees/';
 const LOG = `${homedir()}/.claude/claude-autocontinue.log`;
 
 const hook = (() => {
@@ -43,11 +45,14 @@ const hook = (() => {
   }
 })();
 if (hook.hook_event_name !== 'StopFailure') process.exit(0);
+// tmux sessions: the cut family stays ours — auto-retry matches only
+// rate-limit/overload patterns, so an incomplete break in tmux had no owner
+// (gtoil 2026-11-05). socket-send reaches tmux sessions fine; limits stay
+// auto-retry's, triggers don't overlap.
 const transcriptPath = hook.transcript_path;
 const sessionId = typeof hook.session_id === 'string' && SESSION_RE.test(hook.session_id) ? hook.session_id : null;
-const cwd = typeof hook.cwd === 'string' ? hook.cwd : null;
 // no usable session id -> no budget ownership -> no steer (fail-safe)
-if (!transcriptPath || !cwd || !sessionId) process.exit(0);
+if (!transcriptPath || !sessionId) process.exit(0);
 
 function log(kind, extra) {
   try {
@@ -65,8 +70,8 @@ function parse(line) {
 
 const isMainChainAssistant = (m) => m.type === 'assistant' && m.isSidechain !== true;
 // any real user-side input newer than the cut means the session got input
-// already (fresh prompt, AO steering relay, teammate message, pasted image) —
-// do not double-steer; tool_result arrays are bookkeeping, not input
+// already (fresh prompt, teammate message, pasted image) — do not double-steer;
+// tool_result arrays are bookkeeping, not input
 const isFreshInput = (m) => {
   if (m.type !== 'user' || m.isSidechain === true) return false;
   const c = m.message?.content;
@@ -97,7 +102,37 @@ function writeRounds(count) {
   }
 }
 
-setTimeout(() => {
+/** Post text into the session's own inbox socket; true when written. */
+function socketPost(text) {
+  const sockPath = process.env.CLAUDE_CODE_MESSAGING_SOCKET;
+  if (!sockPath) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (ok) => {
+      if (done) return;
+      done = true;
+      s.destroy();
+      resolve(ok);
+    };
+    const s = connect(sockPath, () => {
+      try {
+        const lines = [
+          JSON.stringify({ type: 'auth', token: process.env.CLAUDE_CODE_MESSAGING_TOKEN }),
+          JSON.stringify({ type: 'user', message: { role: 'user', content: text } }),
+        ];
+        s.write(lines.join('\n') + '\n');
+      } catch {
+        finish(false);
+      }
+      s.end();
+    });
+    s.on('error', () => finish(false));
+    s.on('close', () => finish(true));
+    setTimeout(() => finish(false), SOCKET_ACK_MS);
+  });
+}
+
+setTimeout(async () => {
   try {
     if (!existsSync(transcriptPath)) return;
     // per-session kill switch (same marker the Stop branch honors)
@@ -116,41 +151,15 @@ setTimeout(() => {
 
     const rounds = readRounds();
     if (rounds >= MAX_ROUNDS) return log('sf-cap', `rounds=${rounds} cutUuid=${cut.uuid}`);
-
-    if (!cwd.includes(AO_DIR_MARKER)) return log('sf-nonao', `cwd=${basename(cwd)}`);
-    const aoSession = basename(cwd);
-    // budget is spent on the decision (before ao calls): a busy worker burns a
-    // round too — conservative, and dry-run never touches the ao CLI
-    if (!writeRounds(rounds + 1)) return log('nostate', `ao=${aoSession}`);
+    // budget is spent on the decision: a failed delivery burns a round too —
+    // conservative, and dry-run never touches the socket
+    if (!writeRounds(rounds + 1)) return log('nostate');
     if (process.env.AUTOCONTINUE_DRY_RUN === '1') {
-      return log('sf-dry', `ao=${aoSession} cutUuid=${cut.uuid}`);
+      return log('sf-dry', `cutUuid=${cut.uuid}`);
     }
-    const get = spawnSync('ao', ['session', 'get', '--json', aoSession], {
-      encoding: 'utf8',
-      timeout: AO_TIMEOUT_MS,
-    });
-    if (get.status !== 0 || !get.stdout) return log('sf-noao', `ao=${aoSession}`);
-    let record;
-    try {
-      record = JSON.parse(get.stdout).session;
-    } catch {
-      return log('sf-noao', `ao=${aoSession}`);
-    }
-    if (record?.isTerminated) return log('sf-noao', `ao=${aoSession} terminated`);
-    if (record?.activity?.state !== 'idle') {
-      return log('sf-busy', `ao=${aoSession} state=${record?.activity?.state}`);
-    }
-
-    // stable dedupe handle: a uuid-less cut falls back to a constant so AO's
-    // client-message-id dedupe keeps absorbing repeats of the same stall
-    execFileSync('ao', [
-      'send',
-      '--session', aoSession,
-      '--message', 'Continue task',
-      '--steer',
-      '--client-message-id', `autocont-${cut.uuid ?? 'noid'}`,
-    ], { stdio: 'ignore', timeout: AO_TIMEOUT_MS });
-    log('ao-send', `ao=${aoSession} cutUuid=${cut.uuid}`);
+    if (!process.env.CLAUDE_CODE_MESSAGING_SOCKET) return log('sf-nosock');
+    const sent = await socketPost('Continue task');
+    log(sent ? 'socket-send' : 'socket-fail', `cutUuid=${cut.uuid}`);
   } catch (e) {
     log('sf-error', `err=${String(e?.message ?? e).slice(0, 80)}`);
   } finally {
